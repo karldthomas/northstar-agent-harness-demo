@@ -1,0 +1,14 @@
+{
+  "id": "service-outage",
+  "name": "Payments portal unavailable to Finance and Sales",
+  "description": "Finance and Sales teams cannot submit or approve customer payments. The identity and database systems that support the portal are still working, so the agent must determine whether restoring the payments portal is justified.",
+  "objective": "Find out why Finance and Sales cannot use the payments portal and recommend a safe next step.",
+  "profile": "service-outage",
+  "read_only_tools": [
+    "get_incident",
+    "check_service_health",
+    "get_device_diagnostics",
+    "list_recent_deployments"
+  ],
+  "restricted_actions": ["restart_service", "change_service_configuration"]
+}

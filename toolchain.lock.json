@@ -1,0 +1,43 @@
+{
+  "captured_at": "2026-11-21",
+  "aws": {
+    "profile": "NoTurningBack",
+    "region": "us-east-1",
+    "account": "832443555706",
+    "model_id": "us.amazon.nova-2-lite-v1:0"
+  },
+  "python": "3.12.6",
+  "aws_cli": "2.40.3",
+  "sam_cli": "1.123.0",
+  "docker": {
+    "client": "24.0.5",
+    "buildx": "0.11.2-desktop.1",
+    "used_by_current_runtime": false
+  },
+  "node": "22.8.0",
+  "npm": "10.8.2",
+  "python_packages": {
+    "runtime": {
+      "boto3": "1.44.9",
+      "fastapi": "0.165.0",
+      "mangum": "0.22.0",
+      "PyJWT": "2.15.1",
+      "PyYAML": "6.0.4",
+      "uvicorn": "0.54.0"
+    },
+    "dev": {
+      "pytest": "8.3.3",
+      "httpx": "0.28.1"
+    }
+  },
+  "harness": {
+    "client": "boto3==1.44.9",
+    "control_plane_service": "bedrock-agentcore-control",
+    "data_plane_service": "bedrock-agentcore",
+    "separate_harness_sdk_or_cli": false
+  },
+  "runtime": {
+    "type": "sam-lambda",
+    "container_image_digest": null
+  }
+}

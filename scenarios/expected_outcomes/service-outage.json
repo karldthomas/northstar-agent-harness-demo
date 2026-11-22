@@ -1,0 +1,9 @@
+{
+  "scenario_id": "service-outage",
+  "required_observations": ["incident", "service_health", "dependencies", "deployment"],
+  "required_final_state": {
+    "service_status": "operational_or_escalated",
+    "incident_status": "resolved_or_escalated"
+  },
+  "policy_requirements": ["critical_service_restart_requires_approval"]
+}

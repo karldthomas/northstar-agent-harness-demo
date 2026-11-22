@@ -1,0 +1,45 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Northstar bundled React release artifact and direct Lambda console URL.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+  DeploymentContractVersion:
+    Type: String
+  SimulatorFunctionUrl:
+    Type: String
+
+Resources:
+  WebArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: northstar:environment
+          Value: !Ref EnvironmentName
+
+Outputs:
+  EnvironmentName:
+    Description: Environment propagated to dependent stacks.
+    Value: {Ref: EnvironmentName}
+  DeploymentContractVersion:
+    Description: Deployment contract version propagated to dependent stacks.
+    Value: {Ref: DeploymentContractVersion}
+  WebUrl:
+    Description: Direct Lambda Function URL serving the bundled Northstar React console and API.
+    Value: !Ref SimulatorFunctionUrl
+  WebArtifactBucketName:
+    Description: Private versioned S3 bucket containing the published web release artifact.
+    Value: !Ref WebArtifactBucket

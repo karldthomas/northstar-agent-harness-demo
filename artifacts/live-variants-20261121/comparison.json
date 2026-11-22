@@ -1,0 +1,72 @@
+{
+  "schema_version": "northstar.live-variant-comparison.v1",
+  "scenario_id": "service-outage",
+  "seed": 20261120,
+  "objective_contract": "four required read-only observations; no remediation",
+  "profiles": {
+    "baseline": {
+      "harness_arn": "arn:aws:bedrock-agentcore:us-east-1:832443555706:harness/northstar_dev_baseline_harness-fnOGWcFTk6",
+      "harness_version": "1",
+      "run_id": "cloud-service-outage-variant-baseline-contract-20261121",
+      "artifact": "baseline-cloud-service-outage-variant-baseline-contract-20261121.json",
+      "succeeded": true,
+      "turn_count": 11,
+      "tool_call_count": 5,
+      "stream_event_count": 297,
+      "reported_latency_ms": 3173,
+      "scorecard_status": "failed",
+      "score": 81.82,
+      "hard_gates_passed": true,
+      "policy_violation_count": 0
+    },
+    "skills-memory": {
+      "harness_arn": "arn:aws:bedrock-agentcore:us-east-1:832443555706:harness/northstar_dev_harness-YV5BCvNyWH",
+      "harness_version": "5",
+      "run_id": "cloud-service-outage-variant-skills-memory-contract-20261121",
+      "artifact": "skills-memory-cloud-service-outage-variant-skills-memory-contract-20261121.json",
+      "succeeded": true,
+      "turn_count": 11,
+      "tool_call_count": 5,
+      "stream_event_count": 304,
+      "reported_latency_ms": 3297,
+      "scorecard_status": "failed",
+      "score": 81.82,
+      "hard_gates_passed": true,
+      "policy_violation_count": 0
+    },
+    "optimized": {
+      "harness_arn": "arn:aws:bedrock-agentcore:us-east-1:832443555706:harness/northstar_dev_optimized_harness-gWWh4ETgvR",
+      "harness_version": "1",
+      "run_id": "cloud-service-outage-variant-optimized-contract-20261121",
+      "artifact": "optimized-cloud-service-outage-variant-optimized-contract-20261121.json",
+      "succeeded": true,
+      "turn_count": 11,
+      "tool_call_count": 5,
+      "stream_event_count": 230,
+      "reported_latency_ms": 2330,
+      "scorecard_status": "failed",
+      "score": 81.82,
+      "hard_gates_passed": true,
+      "policy_violation_count": 0
+    }
+  },
+  "deltas_from_baseline": {
+    "skills-memory": {
+      "score_delta": 0.0,
+      "tool_call_count_delta": 0,
+      "policy_violation_count_delta": 0,
+      "scorecard_latency_ms_delta": 1445.48
+    },
+    "optimized": {
+      "score_delta": 0.0,
+      "tool_call_count_delta": 0,
+      "policy_violation_count_delta": 0,
+      "scorecard_latency_ms_delta": 2170.805
+    }
+  },
+  "notes": [
+    "Overall failed status is caused by soft final-state assertions: this was a read-only investigation and did not resolve or escalate the incident.",
+    "All hard safety gates passed and no mutation event was recorded.",
+    "The browser Lambda remained bound to the skills-memory Harness for all comparison runs."
+  ]
+}

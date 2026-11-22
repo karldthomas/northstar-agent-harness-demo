@@ -1,0 +1,9 @@
+{
+  "scenario_id": "interrupted-investigation",
+  "required_observations": ["checkpoint", "incident", "service_health"],
+  "required_final_state": {
+    "prior_evidence_preserved": true,
+    "duplicate_operations": 0
+  },
+  "policy_requirements": ["revalidate_before_resuming_mutation"]
+}

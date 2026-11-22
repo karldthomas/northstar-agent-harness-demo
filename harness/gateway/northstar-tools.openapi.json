@@ -1,0 +1,118 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Northstar Simulator Read-Only Tools",
+    "version": "1.0.0",
+    "description": "Read-only synthetic IT operations observations for AgentCore Gateway."
+  },
+  "servers": [{"url": "http://localhost:8080"}],
+  "paths": {
+    "/simulator/runs/{run_id}/tools/check-service-health": {
+      "get": {
+        "operationId": "check_service_health",
+        "summary": "Check synthetic service health",
+        "parameters": [
+          {"$ref": "#/components/parameters/RunId"},
+          {"name": "service_id", "in": "query", "required": false, "schema": {"type": "string", "default": "svc-vpn-gateway"}}
+        ],
+        "responses": {"200": {"$ref": "#/components/responses/ToolObservation"}}
+      }
+    },
+    "/simulator/runs/{run_id}/tools/get-device-diagnostics": {
+      "get": {
+        "operationId": "get_device_diagnostics",
+        "summary": "Read diagnostics for one synthetic device",
+        "parameters": [
+          {"$ref": "#/components/parameters/RunId"},
+          {"name": "device_id", "in": "query", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"$ref": "#/components/responses/ToolObservation"}}
+      }
+    },
+    "/simulator/runs/{run_id}/tools/get-incident": {
+      "get": {
+        "operationId": "get_incident",
+        "summary": "Read a synthetic incident",
+        "parameters": [
+          {"$ref": "#/components/parameters/RunId"},
+          {"name": "incident_id", "in": "query", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"$ref": "#/components/responses/ToolObservation"}}
+      }
+    },
+    "/simulator/runs/{run_id}/tools/find-affected-devices": {
+      "get": {
+        "operationId": "find_affected_devices",
+        "summary": "Find devices affected by a synthetic incident",
+        "parameters": [
+          {"$ref": "#/components/parameters/RunId"},
+          {"name": "incident_id", "in": "query", "required": true, "schema": {"type": "string"}},
+          {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 150, "default": 100}}
+        ],
+        "responses": {"200": {"$ref": "#/components/responses/ToolObservation"}}
+      }
+    },
+    "/simulator/runs/{run_id}/tools/list-recent-deployments": {
+      "get": {
+        "operationId": "list_recent_deployments",
+        "summary": "Read recent synthetic software deployments",
+        "parameters": [
+          {"$ref": "#/components/parameters/RunId"},
+          {"name": "application_id", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10}}
+        ],
+        "responses": {"200": {"$ref": "#/components/responses/ToolObservation"}}
+      }
+    },
+    "/simulator/runs/{run_id}/tools/search-knowledge": {
+      "get": {
+        "operationId": "search_knowledge",
+        "summary": "Search versioned synthetic runbook articles",
+        "parameters": [
+          {"$ref": "#/components/parameters/RunId"},
+          {"name": "query", "in": "query", "required": true, "schema": {"type": "string", "minLength": 1}},
+          {"name": "limit", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}}
+        ],
+        "responses": {"200": {"$ref": "#/components/responses/ToolObservation"}}
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "RunId": {
+        "name": "run_id",
+        "in": "path",
+        "required": true,
+        "schema": {"type": "string"},
+        "description": "Isolated synthetic scenario run identifier."
+      }
+    },
+    "responses": {
+      "ToolObservation": {
+        "description": "Typed authoritative read-only simulator observation.",
+        "content": {
+          "application/json": {"schema": {"$ref": "#/components/schemas/ToolObservation"}}
+        }
+      }
+    },
+    "schemas": {
+      "ToolObservation": {
+        "type": "object",
+        "required": ["schema_version", "tool_name", "scenario_run_id", "status", "read_only", "authoritative", "data"],
+        "properties": {
+          "schema_version": {"type": "string"},
+          "tool_name": {"type": "string"},
+          "scenario_run_id": {"type": "string"},
+          "request_id": {"type": "string"},
+          "status": {"type": "string", "enum": ["succeeded", "failed"]},
+          "data": {"type": "object", "additionalProperties": true},
+          "error": {"type": "object", "additionalProperties": true},
+          "read_only": {"type": "boolean", "enum": [true]},
+          "authoritative": {"type": "boolean", "enum": [true]},
+          "state_revision": {"type": "integer"},
+          "observed_at": {"type": "string", "format": "date-time"}
+        }
+      }
+    }
+  }
+}

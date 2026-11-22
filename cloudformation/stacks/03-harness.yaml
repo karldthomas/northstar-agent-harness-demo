@@ -1,0 +1,220 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Northstar managed Harness handoff contract.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+  DeploymentContractVersion:
+    Type: String
+  SimulatorApiUrl:
+    Type: String
+  HarnessExecutionRoleArn:
+    Type: String
+  GatewayExecutionRoleArn:
+    Type: String
+  HarnessHookFunctionArn:
+    Type: String
+  PromptModelId:
+    Type: String
+    Default: us.amazon.nova-2-lite-v1:0
+    Description: Model or inference profile associated with managed Northstar prompt variants.
+
+Resources:
+  InvestigationPrompt:
+    Type: AWS::Bedrock::Prompt
+    Properties:
+      Name: !Sub northstar-${EnvironmentName}-investigation
+      Description: Evidence-first investigation and business-facing recommendation.
+      DefaultVariant: default
+      Variants:
+        - Name: default
+          ModelId: !Ref PromptModelId
+          TemplateType: CHAT
+          InferenceConfiguration:
+            Text:
+              MaxTokens: 4096
+              Temperature: 0
+          TemplateConfiguration:
+            Chat:
+              InputVariables:
+                - Name: objective
+                - Name: scenario_run_id
+                - Name: incident_id
+                - Name: input
+              Messages:
+                - Role: user
+                  Content:
+                    - Text: |
+                        {{objective}}
+
+                        Investigate this Northstar synthetic operations situation.
+                        Scenario run ID: {{scenario_run_id}}
+                        Incident ID: {{incident_id}}
+
+                        Use only the explicitly allowed read-only simulator tools. The scenario run ID in the runtime context is authoritative and must be included in every simulator tool call. Use read-only evidence first, cite the observations you relied on, and report unresolved or conflicting evidence instead of guessing.
+
+                        After the investigation, always finish with a clearly labeled Recommendation section containing exactly these business-facing fields:
+                        - Proposed change: the specific change you recommend, or None if the evidence does not support a safe change
+                        - Scope: the exact service, incident, or asset set affected
+                        - Approval required: Yes or No, with a short reason
+                        - Evidence: the observations that support the recommendation
+                        - Execution status: Not executed
+                        Do not claim that a change was approved, executed, or verified.
+
+                        Runtime investigation context:
+                        {{input}}
+      Tags:
+        Environment: !Ref EnvironmentName
+        Purpose: prompt-management
+
+  InvestigationPromptVersion:
+    Type: AWS::Bedrock::PromptVersion
+    Properties:
+      PromptArn: !Ref InvestigationPrompt
+      Description: Initial immutable Northstar investigation prompt version.
+      Tags:
+        Environment: !Ref EnvironmentName
+        Purpose: prompt-management
+
+  ApprovalResumptionPrompt:
+    Type: AWS::Bedrock::Prompt
+    Properties:
+      Name: !Sub northstar-${EnvironmentName}-approval-resumption
+      Description: Read-only rehydration after an application-owned approved operation.
+      DefaultVariant: default
+      Variants:
+        - Name: default
+          ModelId: !Ref PromptModelId
+          TemplateType: CHAT
+          InferenceConfiguration:
+            Text:
+              MaxTokens: 4096
+              Temperature: 0
+          TemplateConfiguration:
+            Chat:
+              InputVariables:
+                - Name: objective
+                - Name: scenario_run_id
+                - Name: approval_id
+                - Name: operation_id
+                - Name: action
+                - Name: input
+              Messages:
+                - Role: user
+                  Content:
+                    - Text: |
+                        {{objective}}
+
+                        Resume the same Northstar synthetic operations investigation after an application-owned approval-gated operation.
+                        Scenario run ID: {{scenario_run_id}}
+                        Approval ID: {{approval_id}}
+                        Operation ID: {{operation_id}}
+                        Action: {{action}}
+
+                        The application has already enforced Cognito authorization, exact scope, idempotency, and post-action verification. Do not execute or propose a mutation. Use only the explicitly allowed read-only simulator tools to reread authoritative state, identify partial or unresolved targets, and report whether the operation is verified.
+
+                        Runtime resumption context:
+                        {{input}}
+      Tags:
+        Environment: !Ref EnvironmentName
+        Purpose: prompt-management
+
+  ApprovalResumptionPromptVersion:
+    Type: AWS::Bedrock::PromptVersion
+    Properties:
+      PromptArn: !Ref ApprovalResumptionPrompt
+      Description: Initial immutable Northstar approval-resumption prompt version.
+      Tags:
+        Environment: !Ref EnvironmentName
+        Purpose: prompt-management
+
+  EvaluationPrompt:
+    Type: AWS::Bedrock::Prompt
+    Properties:
+      Name: !Sub northstar-${EnvironmentName}-evaluation
+      Description: Bounded read-only evidence prompt used by smoke and evaluation runs.
+      DefaultVariant: default
+      Variants:
+        - Name: default
+          ModelId: !Ref PromptModelId
+          TemplateType: CHAT
+          InferenceConfiguration:
+            Text:
+              MaxTokens: 3072
+              Temperature: 0
+          TemplateConfiguration:
+            Chat:
+              InputVariables:
+                - Name: objective
+                - Name: required_tools_text
+                - Name: scenario_run_id
+                - Name: incident_id
+                - Name: input
+              Messages:
+                - Role: user
+                  Content:
+                    - Text: |
+                        {{objective}}
+
+                        This is a read-only evaluation run for the synthetic Northstar enterprise. Do not attempt remediation, approval, access grants, restarts, configuration changes, or any other write. Use each of these required read-only simulator tools at least once in a sensible order. Required tool names: {{required_tools_text}}. Scenario run ID: {{scenario_run_id}}. Include the scenario run ID in every call, then stop and give a concise evidence-based summary under 200 words.
+
+                        Runtime evaluation context:
+                        {{input}}
+      Tags:
+        Environment: !Ref EnvironmentName
+        Purpose: prompt-management
+
+  EvaluationPromptVersion:
+    Type: AWS::Bedrock::PromptVersion
+    Properties:
+      PromptArn: !Ref EvaluationPrompt
+      Description: Initial immutable Northstar evaluation prompt version.
+      Tags:
+        Environment: !Ref EnvironmentName
+        Purpose: prompt-management
+
+  HarnessHandoffParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /northstar/${EnvironmentName}/harness/simulator-api-url
+      Type: String
+      Value: !Ref SimulatorApiUrl
+      Description: Simulator API URL consumed by the managed Harness provisioning step.
+
+Outputs:
+  EnvironmentName:
+    Description: Environment propagated to dependent stacks.
+    Value: {Ref: EnvironmentName}
+  DeploymentContractVersion:
+    Description: Deployment contract version propagated to dependent stacks.
+    Value: {Ref: DeploymentContractVersion}
+  SimulatorApiUrl:
+    Description: Simulator URL consumed by the Gateway target provisioner.
+    Value: {Ref: SimulatorApiUrl}
+  HarnessExecutionRoleArn:
+    Description: Harness execution role consumed by the control-plane provisioner.
+    Value: {Ref: HarnessExecutionRoleArn}
+  GatewayExecutionRoleArn:
+    Description: Gateway execution role consumed by the control-plane provisioner.
+    Value: {Ref: GatewayExecutionRoleArn}
+  HarnessHookFunctionArn:
+    Description: Harness lifecycle decision hook consumed by the control-plane provisioner.
+    Value: {Ref: HarnessHookFunctionArn}
+  InvestigationPromptArn:
+    Description: Base Bedrock Prompt Management ARN for the investigation prompt.
+    Value: !Ref InvestigationPrompt
+  InvestigationPromptVersionArn:
+    Description: Initial immutable investigation prompt version ARN.
+    Value: !Ref InvestigationPromptVersion
+  ApprovalResumptionPromptArn:
+    Description: Base Bedrock Prompt Management ARN for the approval-resumption prompt.
+    Value: !Ref ApprovalResumptionPrompt
+  ApprovalResumptionPromptVersionArn:
+    Description: Initial immutable approval-resumption prompt version ARN.
+    Value: !Ref ApprovalResumptionPromptVersion
+  EvaluationPromptArn:
+    Description: Base Bedrock Prompt Management ARN for the evaluation prompt.
+    Value: !Ref EvaluationPrompt
+  EvaluationPromptVersionArn:
+    Description: Initial immutable evaluation prompt version ARN.
+    Value: !Ref EvaluationPromptVersion

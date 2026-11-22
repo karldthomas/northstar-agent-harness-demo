@@ -1,0 +1,119 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Northstar foundation roles for the managed Harness and Gateway.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+  DeploymentContractVersion:
+    Type: String
+
+Resources:
+  HarnessExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub northstar-${EnvironmentName}-harness-execution
+      Description: !Sub Least-privilege execution role for the ${EnvironmentName} Northstar Harness.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: NorthstarHarnessExecution
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: BedrockModelInvocation
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  # The managed Harness is configured with the US Nova 2 Lite
+                  # inference profile. The profile may route to the same
+                  # foundation model in another US region, so keep the model
+                  # name exact while allowing only that model's regional ARNs.
+                  - !Sub arn:${AWS::Partition}:bedrock:*::foundation-model/amazon.nova-2-lite-v1:0
+                  - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.amazon.nova-2-lite-v1:0
+              - Sid: NorthstarGatewayInvocation
+                Effect: Allow
+                Action: bedrock-agentcore:InvokeGateway
+                Resource: !Sub arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:gateway/northstar-${EnvironmentName}-*
+              - Sid: NorthstarHarnessLifecycleHook
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:northstar-${EnvironmentName}-harness-hook
+              - Sid: NorthstarManagedMemory
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:CreateEvent
+                  - bedrock-agentcore:DeleteEvent
+                  - bedrock-agentcore:GetEvent
+                  - bedrock-agentcore:ListEvents
+                  - bedrock-agentcore:RetrieveMemoryRecords
+                # Comparison profiles use names such as
+                # northstar_dev_harness-* and northstar_dev_optimized_harness-*.
+                # Keep the wildcard bounded to this environment's Harness
+                # memory resources; do not grant access to arbitrary memory.
+                Resource: !Sub arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:memory/northstar_${EnvironmentName}*_harness-*
+              - Sid: HarnessObservability
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/harness_northstar_${EnvironmentName}_harness-*
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/harness_northstar_${EnvironmentName}_harness-*:*
+              - Sid: HarnessSkillPackages
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::northstar-${EnvironmentName}-01-state-fixturebucket-*
+                  - !Sub arn:${AWS::Partition}:s3:::northstar-${EnvironmentName}-01-state-fixturebucket-*/*
+
+  GatewayExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub northstar-${EnvironmentName}-gateway-execution
+      Description: !Sub Gateway role limited to the ${EnvironmentName} synthetic API endpoint.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: NorthstarSyntheticApiInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: InvokeNorthstarSimulatorLambda
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:northstar-${EnvironmentName}-simulator
+
+Outputs:
+  EnvironmentName:
+    Description: Environment propagated to dependent stacks.
+    Value: {Ref: EnvironmentName}
+  DeploymentContractVersion:
+    Description: Deployment contract version propagated to dependent stacks.
+    Value: {Ref: DeploymentContractVersion}
+  HarnessExecutionRoleArn:
+    Description: Execution role assumed by the managed Northstar Harness.
+    Value: !GetAtt HarnessExecutionRole.Arn
+  GatewayExecutionRoleArn:
+    Description: Execution role assumed by the Northstar AgentCore Gateway.
+    Value: !GetAtt GatewayExecutionRole.Arn

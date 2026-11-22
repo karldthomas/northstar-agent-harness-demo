@@ -1,0 +1,12 @@
+{
+  "Configuration": [
+    {
+      "Key": "EnvironmentName",
+      "Value": "${CF_OUT_EnvironmentName}"
+    },
+    {
+      "Key": "DeploymentContractVersion",
+      "Value": "${CF_OUT_DeploymentContractVersion}"
+    }
+  ]
+}

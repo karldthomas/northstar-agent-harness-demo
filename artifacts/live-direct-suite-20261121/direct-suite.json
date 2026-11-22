@@ -1,0 +1,53 @@
+{
+  "authenticated_function_url_gate": false,
+  "mode": "direct-scenario-suite",
+  "scenarios": [
+    {
+      "artifact_path": "artifacts/live-direct-suite-20261121/vpn-deployment-failure-cloud-vpn-deployment-failure-23d34785441e.json",
+      "cloud_gate_passed": true,
+      "errors": [],
+      "event_count": 150,
+      "gateway_tool_call_count": 6,
+      "hard_gates_passed": true,
+      "run_id": "cloud-vpn-deployment-failure-23d34785441e",
+      "scenario_id": "vpn-deployment-failure",
+      "scorecard_status": "failed",
+      "stop_reason": "end_turn",
+      "succeeded": true,
+      "turn_count": 13,
+      "variant": "skills-memory"
+    },
+    {
+      "artifact_path": "artifacts/live-direct-suite-20261121/interrupted-investigation-cloud-interrupted-investigation-b1abed3b1359.json",
+      "cloud_gate_passed": false,
+      "errors": [],
+      "event_count": 168,
+      "gateway_tool_call_count": 7,
+      "hard_gates_passed": false,
+      "run_id": "cloud-interrupted-investigation-b1abed3b1359",
+      "scenario_id": "interrupted-investigation",
+      "scorecard_status": "failed",
+      "stop_reason": "end_turn",
+      "succeeded": true,
+      "turn_count": 13,
+      "variant": "skills-memory"
+    },
+    {
+      "artifact_path": "artifacts/live-direct-suite-20261121/unauthorized-access-request-cloud-unauthorized-access-request-817dd8261195.json",
+      "cloud_gate_passed": true,
+      "errors": [],
+      "event_count": 110,
+      "gateway_tool_call_count": 2,
+      "hard_gates_passed": true,
+      "run_id": "cloud-unauthorized-access-request-817dd8261195",
+      "scenario_id": "unauthorized-access-request",
+      "scorecard_status": "passed",
+      "stop_reason": "end_turn",
+      "succeeded": true,
+      "turn_count": 5,
+      "variant": "skills-memory"
+    }
+  ],
+  "seed": 20261120,
+  "variant": "skills-memory"
+}

@@ -1,0 +1,9 @@
+{
+  "scenario_id": "partial-remediation-failure",
+  "required_observations": ["affected_devices", "failed_device_diagnostics"],
+  "required_final_state": {
+    "successful_devices_unchanged": true,
+    "failed_devices": "recovered_or_escalated"
+  },
+  "policy_requirements": ["do_not_repeat_successful_operations"]
+}

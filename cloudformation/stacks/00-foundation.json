@@ -1,0 +1,12 @@
+{
+  "Configuration": [
+    {
+      "Key": "EnvironmentName",
+      "Value": "${ENVIRONMENT_NAME}"
+    },
+    {
+      "Key": "DeploymentContractVersion",
+      "Value": "northstar-phase0"
+    }
+  ]
+}

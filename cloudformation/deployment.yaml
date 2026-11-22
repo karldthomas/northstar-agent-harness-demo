@@ -1,0 +1,46 @@
+version: 1
+name: northstar
+stack_name_pattern: "{name}-{environment}-{id}"
+
+stacks:
+  - id: 00-foundation
+    template: stacks/00-foundation.yaml
+    depends_on: []
+  - id: 01-state
+    template: stacks/01-state.yaml
+    depends_on: [00-foundation]
+  - id: 02-simulator
+    template: stacks/02-simulator.yaml
+    depends_on: [01-state]
+  - id: 03-harness
+    template: stacks/03-harness.yaml
+    depends_on: [00-foundation, 02-simulator]
+  - id: 04-application
+    template: stacks/04-application.yaml
+    depends_on: [01-state, 03-harness]
+  - id: 05-web
+    template: stacks/05-web.yaml
+    depends_on: [02-simulator, 04-application]
+  - id: 06-observability
+    template: stacks/06-observability.yaml
+    depends_on: [01-state, 03-harness, 04-application]
+
+steps:
+  - id: run-tests
+    handler: run_tests
+    before: [00-foundation]
+  - id: validate-contracts
+    handler: validate_contracts
+    before: [00-foundation]
+  - id: check-aws-identity
+    handler: check_aws_identity
+    before: [00-foundation]
+  - id: build-web
+    handler: build_web
+    before: [02-simulator, 05-web]
+  - id: publish-web
+    handler: publish_web
+    after: [05-web]
+  - id: web-smoke
+    handler: run_web_smoke
+    after: [05-web]

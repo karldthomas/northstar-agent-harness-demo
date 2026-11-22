@@ -1,0 +1,14 @@
+{
+  "id": "partial-remediation-failure",
+  "name": "Five employees still blocked after recovery",
+  "description": "A recovery helped most of the 40 London employees who lost access to company systems, but five employees still cannot work normally. The agent must identify those five people and recommend a targeted next step without repeating what already succeeded.",
+  "objective": "Identify the five employees still unable to work and recommend a targeted recovery.",
+  "profile": "partial-remediation-failure",
+  "read_only_tools": [
+    "get_incident",
+    "find_affected_devices",
+    "get_device_diagnostics",
+    "list_recent_deployments"
+  ],
+  "restricted_actions": ["retry_device_remediation", "escalate_unresolved_devices"]
+}

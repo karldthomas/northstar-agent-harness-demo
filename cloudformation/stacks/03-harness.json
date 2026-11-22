@@ -1,0 +1,33 @@
+{
+  "Configuration": [
+    {
+      "Key": "EnvironmentName",
+      "Value": "${CF_OUT_EnvironmentName}"
+    },
+    {
+      "Key": "DeploymentContractVersion",
+      "Value": "${CF_OUT_DeploymentContractVersion}"
+    },
+    {
+      "Key": "SimulatorApiUrl",
+      "Value": "${CF_OUT_SimulatorApiUrl}"
+    },
+    {
+      "Key": "HarnessExecutionRoleArn",
+      "Value": "${CF_OUT_HarnessExecutionRoleArn}"
+    },
+    {
+      "Key": "GatewayExecutionRoleArn",
+      "Value": "${CF_OUT_GatewayExecutionRoleArn}"
+    },
+    {
+      "Key": "HarnessHookFunctionArn",
+      "Value": "${CF_OUT_HarnessHookFunctionArn}"
+    },
+    {
+      "Key": "PromptModelId",
+      "Value": "${PROMPT_MODEL_ID}",
+      "Default": "us.amazon.nova-2-lite-v1:0"
+    }
+  ]
+}

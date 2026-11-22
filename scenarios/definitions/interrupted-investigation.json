@@ -1,0 +1,15 @@
+{
+  "id": "interrupted-investigation",
+  "name": "Investigation paused while employees remain blocked",
+  "description": "An earlier investigation into 40 London employees losing access to company systems stopped after the first checks. The agent must resume the case without losing what was already learned and recommend the safest next step.",
+  "objective": "Resume the investigation, preserve the earlier findings, and recommend the safest way to restore employee access.",
+  "profile": "interrupted-investigation",
+  "read_only_tools": [
+    "get_incident",
+    "check_service_health",
+    "find_affected_devices",
+    "list_recent_deployments",
+    "get_device_diagnostics"
+  ],
+  "restricted_actions": ["request_rollback_approval", "rollback_deployment"]
+}

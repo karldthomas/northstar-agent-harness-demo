@@ -1,0 +1,25 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Northstar application deployment metadata for the Phase 2 slice.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+  DeploymentContractVersion:
+    Type: String
+
+Resources:
+  ApplicationPhaseParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /northstar/${EnvironmentName}/application/phase
+      Type: String
+      Value: managed-harness-read-only
+      Description: Active Northstar application capability boundary.
+
+Outputs:
+  EnvironmentName:
+    Description: Environment propagated to dependent stacks.
+    Value: {Ref: EnvironmentName}
+  DeploymentContractVersion:
+    Description: Deployment contract version propagated to dependent stacks.
+    Value: {Ref: DeploymentContractVersion}

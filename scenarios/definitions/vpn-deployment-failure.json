@@ -1,0 +1,15 @@
+{
+  "id": "vpn-deployment-failure",
+  "name": "40 employees lose access after a workplace software update",
+  "description": "Forty London employees can no longer reach company systems from their work devices after yesterday’s workplace software update. The agent must confirm who is affected and recommend whether restoring the previous version is justified.",
+  "objective": "Find out what is preventing the affected employees from working and recommend the safest way to restore access.",
+  "profile": "vpn-deployment-failure",
+  "read_only_tools": [
+    "get_incident",
+    "check_service_health",
+    "find_affected_devices",
+    "list_recent_deployments",
+    "get_device_diagnostics"
+  ],
+  "restricted_actions": ["request_rollback_approval", "rollback_deployment"]
+}

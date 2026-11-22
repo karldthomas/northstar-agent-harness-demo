@@ -1,0 +1,245 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Northstar simulator API, direct Function URL, and Cognito boundary.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+  DeploymentContractVersion:
+    Type: String
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    MemorySize: 1024
+    Architectures:
+      - arm64
+    Environment:
+      Variables:
+        NORTHSTAR_ENVIRONMENT: !Ref EnvironmentName
+        NORTHSTAR_AUTH_REQUIRED: 'true'
+        NORTHSTAR_SERVE_WEB: 'true'
+        NORTHSTAR_CORS_ORIGINS: '*'
+        NORTHSTAR_COGNITO_USER_POOL_ID: !Ref NorthstarUserPool
+        NORTHSTAR_COGNITO_CLIENT_ID: !Ref NorthstarUserPoolClient
+        NORTHSTAR_COGNITO_ISSUER: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${NorthstarUserPool}
+        NORTHSTAR_ADMIN_GROUP: northstar-admin
+        NORTHSTAR_STATE_TABLE_NAME: !Sub northstar-${EnvironmentName}-scenario-state
+        NORTHSTAR_PROMPT_SOURCE: bedrock
+        NORTHSTAR_PROMPT_SELECTIONS_TABLE_NAME: !Sub northstar-${EnvironmentName}-prompt-selections
+        NORTHSTAR_RATE_LIMIT_ENABLED: 'true'
+        NORTHSTAR_RATE_LIMIT_REQUESTS: '120'
+        NORTHSTAR_AUTH_RATE_LIMIT_REQUESTS: '10'
+        NORTHSTAR_RATE_LIMIT_WINDOW_SECONDS: '60'
+
+Resources:
+  SimulatorApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub northstar-${EnvironmentName}-simulator
+      StageName: v1
+      EndpointConfiguration: REGIONAL
+      Auth:
+        DefaultAuthorizer: AWS_IAM
+
+  NorthstarUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub northstar-${EnvironmentName}-users
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          RequireUppercase: true
+          TemporaryPasswordValidityDays: 7
+      UserPoolTags:
+        Environment: !Ref EnvironmentName
+        Purpose: northstar-console
+
+  NorthstarAdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: northstar-admin
+      Description: May invite users to the Northstar console.
+      UserPoolId: !Ref NorthstarUserPool
+      Precedence: 1
+
+  NorthstarUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref NorthstarUserPool
+      ClientName: !Sub northstar-${EnvironmentName}-web
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+
+  SimulatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub northstar-${EnvironmentName}-simulator
+      Description: Deterministic Northstar simulator API and approval boundary.
+      ReservedConcurrentExecutions: 10
+      CodeUri: ../..
+      Handler: apps.api.lambda_handler.handler
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            - Sid: CognitoUserAuthentication
+              Effect: Allow
+              Action:
+                - cognito-idp:InitiateAuth
+                - cognito-idp:RespondToAuthChallenge
+              Resource: '*'
+            - Sid: CognitoAdminUserManagement
+              Effect: Allow
+              Action:
+                - cognito-idp:AdminCreateUser
+              Resource: !GetAtt NorthstarUserPool.Arn
+            - Sid: InvokeBoundNorthstarHarness
+              Effect: Allow
+              Action:
+                - bedrock-agentcore:InvokeHarness
+                - bedrock-agentcore:InvokeAgentRuntime
+              Resource: !Sub arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:harness/*
+            - Sid: PersistScenarioRunStateAndEvents
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:Scan
+              Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/northstar-${EnvironmentName}-scenario-state
+            - Sid: PromptSelectionStorage
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+              Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/northstar-${EnvironmentName}-prompt-selections
+            - Sid: BedrockPromptManagement
+              Effect: Allow
+              Action:
+                - bedrock:ListPrompts
+                - bedrock:GetPrompt
+                - bedrock:UpdatePrompt
+                - bedrock:CreatePromptVersion
+              Resource: '*'
+      FunctionUrlConfig:
+        AuthType: NONE
+        Cors:
+          AllowCredentials: false
+          AllowHeaders:
+            - authorization
+            - content-type
+          AllowMethods:
+            - GET
+            - POST
+            - DELETE
+          AllowOrigins:
+            - '*'
+          MaxAge: 300
+      Events:
+        Health:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SimulatorApi
+            Path: /healthz
+            Method: get
+        Root:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SimulatorApi
+            Path: /
+            Method: get
+        SimulatorProxy:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SimulatorApi
+            Path: /{proxy+}
+            Method: any
+
+  SimulatorInvocationBudgetAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: !Sub "Northstar ${EnvironmentName} simulator exceeded 5,000 invocations in one hour."
+      Namespace: AWS/Lambda
+      MetricName: Invocations
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref SimulatorFunction
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 5000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  SimulatorGatewayInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref SimulatorFunction
+      Principal: bedrock-agentcore.amazonaws.com
+
+  HarnessHookFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub northstar-${EnvironmentName}-harness-hook
+      Description: Deny-by-default read-only guard for managed Harness tool calls.
+      CodeUri: ../..
+      Handler: apps.api.hook_handler.handler
+      Policies:
+        - AWSLambdaBasicExecutionRole
+
+  HarnessHookInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref HarnessHookFunction
+      Principal: bedrock-agentcore.amazonaws.com
+
+Outputs:
+  EnvironmentName:
+    Description: Environment propagated to dependent stacks.
+    Value: {Ref: EnvironmentName}
+  DeploymentContractVersion:
+    Description: Deployment contract version propagated to dependent stacks.
+    Value: {Ref: DeploymentContractVersion}
+  SimulatorApiId:
+    Description: API Gateway REST API ID for the simulator.
+    Value: !Ref SimulatorApi
+  SimulatorApiStage:
+    Description: API Gateway REST API stage for the simulator.
+    Value: v1
+  SimulatorApiUrl:
+    Description: IAM-protected HTTPS endpoint for the simulator.
+    Value: !Sub https://${SimulatorApi}.execute-api.${AWS::Region}.amazonaws.com/v1
+  SimulatorFunctionArn:
+    Description: Lambda function hosting the simulator API.
+    Value: !GetAtt SimulatorFunction.Arn
+  SimulatorFunctionUrl:
+    Description: Direct Lambda Function URL for the Cognito-protected browser API.
+    Value: !GetAtt SimulatorFunctionUrl.FunctionUrl
+  CognitoUserPoolId:
+    Description: Cognito user pool used by the Northstar browser API.
+    Value: !Ref NorthstarUserPool
+  CognitoUserPoolClientId:
+    Description: Public Cognito app client used by the Northstar browser API.
+    Value: !Ref NorthstarUserPoolClient
+  CognitoAdminGroup:
+    Description: Cognito group required to invite users through the API.
+    Value: northstar-admin
+  HarnessHookFunctionArn:
+    Description: Lambda decision hook for managed Harness before-tool-call authorization.
+    Value: !GetAtt HarnessHookFunction.Arn

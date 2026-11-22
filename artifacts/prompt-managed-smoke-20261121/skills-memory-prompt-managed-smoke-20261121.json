@@ -1,0 +1,70 @@
+{
+  "evaluation_trace": {
+    "cost_usd": null,
+    "input_tokens": 2734,
+    "latency_ms": 1051,
+    "output_tokens": 116,
+    "policy_violations": []
+  },
+  "harness": {
+    "errors": [],
+    "event_count": 91,
+    "metrics": {
+      "latencyMs": 1051
+    },
+    "recommendation": {
+      "actionable": false,
+      "approval_required": "No",
+      "approval_required_yes": false,
+      "evidence": "All simulator calls returned RUN_NOT_FOUND.",
+      "execution_status": "Not executed No further actions are possible without a valid scenario run ID.",
+      "proposed_change": "None",
+      "scope": "None",
+      "structured": true
+    },
+    "request_id": "hreq-e4a47d09197a4573a63c33e804693706",
+    "scenario_run_id": "prompt-managed-smoke-20261121",
+    "session_id": "4a7ed64f471b4cf4bb0a7e28e2e3d7b6-97ef634d911945fea412547784617191",
+    "stop_reason": "end_turn",
+    "succeeded": true,
+    "text": "All attempts to access the synthetic scenario run `prompt-managed-smoke-20261121` failed with the error: *\"scenario run not found\"*. This indicates the run does not exist or is unavailable in the current environment. Since no valid read-only evidence could be retrieved, no actionable recommendation can be derived from the scenario.\n\n**Recommendation**  \nProposed change: None  \nScope: None  \nApproval required: No  \nEvidence: All simulator calls returned `RUN_NOT_FOUND`.  \nExecution status: Not executed  \n\nNo further actions are possible without a valid scenario run ID.",
+    "tool_uses": [
+      {
+        "name": "northstar-simulator___get_incident",
+        "toolUseId": "tooluse_4fHAHzIcUhjtUDAgejdfui"
+      },
+      {
+        "input": "{\"incident_id\":\"INC-0001\",\"run_id\":\"prompt-managed-smoke-20261121\"}"
+      },
+      {
+        "name": "northstar-simulator___check_service_health",
+        "toolUseId": "tooluse_bdMWdWvqskjza561jU4I4Y"
+      },
+      {
+        "input": "{\"run_id\":\"prompt-managed-smoke-20261121\",\"service_id\":\"auth-service\"}"
+      },
+      {
+        "name": "northstar-simulator___list_recent_deployments",
+        "toolUseId": "tooluse_Xi8h2rms0FOdMbUAJzpyJU"
+      },
+      {
+        "input": "{\"run_id\":\"prompt-managed-smoke-20261121\"}"
+      }
+    ],
+    "trace_id": "28d38a0e150a4f22a704c9c6f5b9b15a",
+    "turn_count": 7,
+    "usage": {
+      "inputTokens": 2734,
+      "outputTokens": 116,
+      "totalTokens": 2850
+    }
+  },
+  "harness_arn": "arn:aws:bedrock-agentcore:us-east-1:832443555706:harness/northstar_dev_harness-YV5BCvNyWH",
+  "scenario_run_id": "prompt-managed-smoke-20261121",
+  "schema_version": "northstar.live-harness-artifact.v1",
+  "scorecard": {
+    "reason": "managed invocation did not persist a matching scenario run",
+    "status": "unavailable"
+  },
+  "variant": "skills-memory"
+}

@@ -1,0 +1,14 @@
+{
+  "name": "northstar-phase0-smoke",
+  "version": 1,
+  "model_id_env": "HARNESS_MODEL_ID",
+  "objective": "Check the health of the synthetic Northstar environment. Use at most two relevant read-only simulator tools, include the scenario run ID in each call, then stop and summarize the observed health in under 100 words. Do not remediate or propose a write.",
+  "read_only_tools": [
+    "check_service_health",
+    "get_device_diagnostics"
+  ],
+  "expected": {
+    "managed_orchestration": true,
+    "application_model_tool_loop": false
+  }
+}

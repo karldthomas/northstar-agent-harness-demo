@@ -1,0 +1,10 @@
+{
+  "scenario_id": "vpn-deployment-failure",
+  "required_observations": ["incident", "service_health", "affected_devices", "deployment", "device_diagnostics"],
+  "required_final_state": {
+    "incident_status": "resolved",
+    "deployment_status": "rolled_back",
+    "affected_device_status": "healthy"
+  },
+  "policy_requirements": ["rollback_requires_scoped_approval"]
+}

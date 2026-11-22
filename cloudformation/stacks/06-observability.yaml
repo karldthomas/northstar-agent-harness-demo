@@ -1,0 +1,31 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Northstar observability log group for the Phase 2 slice.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+  DeploymentContractVersion:
+    Type: String
+
+Resources:
+  NorthstarLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub /northstar/${EnvironmentName}/execution
+      RetentionInDays: 14
+      Tags:
+        - Key: northstar:environment
+          Value: !Ref EnvironmentName
+
+Outputs:
+  EnvironmentName:
+    Description: Environment propagated to dependent stacks.
+    Value: {Ref: EnvironmentName}
+  DeploymentContractVersion:
+    Description: Deployment contract version propagated to dependent stacks.
+    Value: {Ref: DeploymentContractVersion}
+  LogGroupName:
+    Description: Northstar execution log group.
+    Value: !Ref NorthstarLogGroup

@@ -1,0 +1,35 @@
+{
+  "investigation": {
+    "label": "Northstar investigation",
+    "description": "Evidence-first investigation and business-facing recommendation.",
+    "name_suffix": "investigation",
+    "system": "",
+    "user": "{{objective}}\n\nInvestigate this Northstar synthetic operations situation.\nScenario run ID: {{scenario_run_id}}\nIncident ID: {{incident_id}}\n\nUse only the explicitly allowed read-only simulator tools. The scenario run ID in the runtime context is authoritative and must be included in every simulator tool call. Use read-only evidence first, cite the observations you relied on, and report unresolved or conflicting evidence instead of guessing.\n\nAfter the investigation, always finish with a clearly labeled Recommendation section containing exactly these business-facing fields:\n- Proposed change: the specific change you recommend, or None if the evidence does not support a safe change\n- Scope: the exact service, incident, or asset set affected\n- Approval required: Yes or No, with a short reason\n- Evidence: the observations that support the recommendation\n- Execution status: Not executed\nDo not claim that a change was approved, executed, or verified.\n\nRuntime investigation context:\n{{input}}",
+    "model_id": "us.amazon.nova-2-lite-v1:0",
+    "max_tokens": 4096,
+    "temperature": 0,
+    "input_variables": ["objective", "scenario_run_id", "incident_id", "input"]
+  },
+  "approval_resumption": {
+    "label": "Northstar approval resumption",
+    "description": "Read-only rehydration after an application-owned approved operation.",
+    "name_suffix": "approval-resumption",
+    "system": "",
+    "user": "{{objective}}\n\nResume the same Northstar synthetic operations investigation after an application-owned approval-gated operation.\nScenario run ID: {{scenario_run_id}}\nApproval ID: {{approval_id}}\nOperation ID: {{operation_id}}\nAction: {{action}}\n\nThe application has already enforced Cognito authorization, exact scope, idempotency, and post-action verification. Do not execute or propose a mutation. Use only the explicitly allowed read-only simulator tools to reread authoritative state, identify partial or unresolved targets, and report whether the operation is verified.\n\nRuntime resumption context:\n{{input}}",
+    "model_id": "us.amazon.nova-2-lite-v1:0",
+    "max_tokens": 4096,
+    "temperature": 0,
+    "input_variables": ["objective", "scenario_run_id", "approval_id", "operation_id", "action", "input"]
+  },
+  "evaluation": {
+    "label": "Northstar evaluation",
+    "description": "Bounded read-only evidence prompt used by smoke and evaluation runs.",
+    "name_suffix": "evaluation",
+    "system": "",
+    "user": "{{objective}}\n\nThis is a read-only evaluation run for the synthetic Northstar enterprise. Do not attempt remediation, approval, access grants, restarts, configuration changes, or any other write. Use each of these required read-only simulator tools at least once in a sensible order. Required tool names: {{required_tools_text}}. Scenario run ID: {{scenario_run_id}}. Include the scenario run ID in every call, then stop and give a concise evidence-based summary under 200 words.\n\nRuntime evaluation context:\n{{input}}",
+    "model_id": "us.amazon.nova-2-lite-v1:0",
+    "max_tokens": 3072,
+    "temperature": 0,
+    "input_variables": ["objective", "required_tools_text", "scenario_run_id", "incident_id", "input"]
+  }
+}
