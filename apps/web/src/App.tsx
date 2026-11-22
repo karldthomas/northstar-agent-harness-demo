@@ -168,7 +168,7 @@ function PromptLibrary({ session }: { session: Session }) {
   </section>;
 }
 
-type ChangePlan = { action: string; label: string; targetIds: string[]; payload: Record<string, unknown>; scope: string; idempotencyPrefix: string };
+type ChangePlan = { action: string; label: string; targetIds: string[]; payload: Record<string, unknown>; scope: string; scopeTokens: string[]; idempotencyPrefix: string };
 
 type RecommendationField = "proposed_change" | "scope" | "approval_required" | "evidence" | "execution_status";
 
@@ -214,8 +214,10 @@ function parseRecommendation(report: string): HarnessRecommendation {
 function recommendationMatchesChange(plan: ChangePlan | null, recommendation: HarnessRecommendation | null): boolean {
   if (!plan || !recommendation?.actionable) return false;
   const proposed = recommendation.proposed_change.toLowerCase();
-  if (plan.action === "restart_service") return /\b(?:restart|restore|recover)\b/.test(proposed) && /\b(?:service|application|platform)\b/.test(proposed);
-  if (plan.action === "rollback_vpn_deployment") return /\b(?:rollback|restore)\b/.test(proposed) && /\b(?:connectivity|deployment|workforce|network)\b/.test(proposed);
+  const scope = recommendation.scope.toLowerCase();
+  const scopeMatches = plan.scopeTokens.every((token) => scope.includes(token.toLowerCase()));
+  if (plan.action === "restart_service") return scopeMatches && /\b(?:restart|restore|recover)\b/.test(proposed);
+  if (plan.action === "rollback_vpn_deployment") return scopeMatches && /\b(?:rollback|restore|recover)\b/.test(proposed);
   return false;
 }
 
@@ -290,8 +292,10 @@ function Dashboard({ session, principal, onSignOut }: { session: Session; princi
   const devices = useMemo(() => Object.values(snapshot?.state.devices || {}).slice(0, 60), [snapshot]);
   const rollbackTargets = useMemo(() => {
     const incident = openIncidents.find((item) => item.incident_id === "INC-0001") || openIncidents[0];
-    return (incident?.affected_device_ids || devices.filter((device) => device.vpn_status === "disconnected").map((device) => device.device_id)).slice(0, 5);
-  }, [devices, openIncidents]);
+    return incident?.affected_device_ids || Object.values(snapshot?.state.devices || {})
+      .filter((device) => device.vpn_status === "disconnected")
+      .map((device) => device.device_id);
+  }, [openIncidents, snapshot]);
   const changePlan = useMemo<ChangePlan | null>(() => {
     const restrictedActions = selectedScenario?.restricted_actions || [];
     if (restrictedActions.includes("restart_service")) {
@@ -300,7 +304,8 @@ function Dashboard({ session, principal, onSignOut }: { session: Session; princi
         label: "Restore the affected business service",
         targetIds: ["svc-payments"],
         payload: {},
-        scope: snapshot?.state.services?.["svc-payments"]?.name || "Affected business service",
+        scope: "svc-payments / INC-0003 / Payments Platform",
+        scopeTokens: ["svc-payments", "inc-0003"],
         idempotencyPrefix: "restart-service",
       };
     }
@@ -310,7 +315,8 @@ function Dashboard({ session, principal, onSignOut }: { session: Session; princi
         label: "Restore workforce connectivity",
         targetIds: rollbackTargets,
         payload: { deployment_id: "DEP-0001" },
-        scope: `${rollbackTargets.length} affected device(s) selected for the change`,
+        scope: `DEP-0001 / INC-0001 / all ${rollbackTargets.length} affected device(s)`,
+        scopeTokens: ["dep-0001", "inc-0001", String(rollbackTargets.length)],
         idempotencyPrefix: "restore-connectivity",
       };
     }
@@ -385,7 +391,7 @@ function Dashboard({ session, principal, onSignOut }: { session: Session; princi
   async function proposeChange() {
     if (!runId || !changePlan) return; setBusy("proposal"); setNotice("");
     try {
-      await request(`/simulator/runs/${runId}/operations/proposals`, { method: "POST", body: JSON.stringify({ action: changePlan.action, target_ids: changePlan.targetIds, payload: changePlan.payload, idempotency_key: `${changePlan.idempotencyPrefix}-${runId}-${changePlan.targetIds.join("-")}` }) }, session);
+      await request(`/simulator/runs/${runId}/operations/proposals`, { method: "POST", body: JSON.stringify({ action: changePlan.action, target_ids: changePlan.targetIds, payload: { ...changePlan.payload, recommendation: { proposed_change: agentRecommendation?.proposed_change, scope: agentRecommendation?.scope, approval_required: agentRecommendation?.approval_required } }, idempotency_key: `${changePlan.idempotencyPrefix}-${runId}-${changePlan.targetIds.join("-")}` }) }, session);
       await loadRun(runId, false); setNotice(`${changePlan.label} request submitted for approval.`);
     } catch (error) { setNotice(errorMessage(error)); } finally { setBusy(""); }
   }
@@ -430,7 +436,7 @@ function Dashboard({ session, principal, onSignOut }: { session: Session; princi
         {approvals.length ? <div className="approval-list">{approvals.slice().reverse().map((approval) => <div className="approval-row" key={approval.approval_id}><div><strong>{approvalActionLabel(approval.action)}</strong><small>Scope: {approval.target_ids.length} target(s) · {approval.target_ids.join(", ")}</small><small>Requested by {approval.requested_by} · expires {new Date(approval.expires_at).toLocaleString()}</small></div><div className="approval-actions"><StatusPill tone={approvalTone(approval.status)}>{approval.status}</StatusPill>{principal.is_admin && approval.status === "requested" && <><button className="secondary" disabled={Boolean(busy)} onClick={() => decideApproval(approval.approval_id, "rejected")}>Reject</button><button disabled={Boolean(busy)} onClick={() => decideApproval(approval.approval_id, "approved")}>Approve</button></>}{(approval.status === "approved" || approval.status === "executed") && <button disabled={Boolean(busy)} onClick={() => executeApproval(approval.approval_id)}>{approval.status === "executed" ? "Retry & verify" : "Execute & verify"}</button>}</div></div>)}</div> : agentRecommendation && changePlan && approvalMatchesRecommendation ? <p className="empty-state">No approval request yet.</p> : null}
       </section>
 
-      <section className="dashboard-grid"><article className="panel summary-panel"><div className="section-heading"><div><p className="eyebrow">AUTHORITATIVE SNAPSHOT</p><h2>Environment</h2></div><StatusPill tone={snapshot ? "good" : "neutral"}>{snapshot ? `revision ${snapshot.summary.state_revision}` : "Create a run"}</StatusPill></div>{snapshot ? <><div className="count-grid"><CountCard label="Devices" value={snapshot.summary.entity_counts.devices || 0} detail={formatCounts(snapshot.summary.device_status_counts)} /><CountCard label="Connectivity" value={snapshot.summary.entity_counts.devices || 0} detail={formatCounts(snapshot.summary.vpn_status_counts)} /><CountCard label="Services" value={snapshot.summary.entity_counts.services || 0} detail={formatCounts(snapshot.summary.service_status_counts)} /><CountCard label="Incidents" value={snapshot.summary.entity_counts.incidents || 0} detail={formatCounts(snapshot.summary.incident_status_counts)} /></div><div className="comparison"><strong>Before / after</strong><span>{changedCount ? `${changedCount} entity changes · revision ${comparison?.before.revision} → ${comparison?.after.revision}` : "No authoritative state changes yet."}</span></div><h3>Open incidents</h3><div className="entity-list">{openIncidents.length ? openIncidents.map((incident) => <button className="entity-row" key={incident.incident_id} onClick={() => openEntity("incident", incident.incident_id)}><span><strong>{incident.incident_id}</strong> {incident.title}</span><StatusPill tone="warn">{incident.severity}</StatusPill></button>) : <p className="muted">No open incidents.</p>}</div></> : <p className="empty-state">Create a run to load the digital twin.</p>}</article>
+      <section className="dashboard-grid"><article className="panel summary-panel"><div className="section-heading"><div><p className="eyebrow">AUTHORITATIVE SNAPSHOT</p><h2>Environment</h2></div><StatusPill tone={snapshot ? "good" : "neutral"}>{snapshot ? `revision ${snapshot.summary.revision}` : "Create a run"}</StatusPill></div>{snapshot ? <><div className="count-grid"><CountCard label="Devices" value={snapshot.summary.entity_counts.devices || 0} detail={formatCounts(snapshot.summary.device_status_counts)} /><CountCard label="Connectivity" value={snapshot.summary.entity_counts.devices || 0} detail={formatCounts(snapshot.summary.vpn_status_counts)} /><CountCard label="Services" value={snapshot.summary.entity_counts.services || 0} detail={formatCounts(snapshot.summary.service_status_counts)} /><CountCard label="Incidents" value={snapshot.summary.entity_counts.incidents || 0} detail={formatCounts(snapshot.summary.incident_status_counts)} /></div><div className="comparison"><strong>Before / after</strong><span>{changedCount ? `${changedCount} entity changes · revision ${comparison?.before.revision} → ${comparison?.after.revision}` : "No authoritative state changes yet."}</span></div><h3>Open incidents</h3><div className="entity-list">{openIncidents.length ? openIncidents.map((incident) => <button className="entity-row" key={incident.incident_id} onClick={() => openEntity("incident", incident.incident_id)}><span><strong>{incident.incident_id}</strong> {incident.title}</span><StatusPill tone="warn">{incident.severity}</StatusPill></button>) : <p className="muted">No open incidents.</p>}</div></> : <p className="empty-state">Create a run to load the digital twin.</p>}</article>
         <article className="panel topology-panel"><div className="section-heading"><div><p className="eyebrow">SERVICE GRAPH</p><h2>Dependencies</h2></div></div>{topology ? <div className="service-list">{topology.services.map((service) => <div className="service-node" key={service.service_id}><div><strong>{service.name}</strong><span className="muted">{service.service_id}</span></div><StatusPill tone={service.status === "operational" ? "good" : "bad"}>{service.status}</StatusPill>{service.dependency_ids.length > 0 && <small>depends on {service.dependency_ids.join(", ")}</small>}</div>)}</div> : <p className="empty-state">Create a run to load service topology.</p>}</article></section>
 
       <section className="dashboard-grid lower-grid"><article className="panel device-panel"><div className="section-heading"><div><p className="eyebrow">FLEET VIEW</p><h2>Devices</h2></div><span className="muted">{devices.length ? `${snapshot?.summary.entity_counts.devices} total · showing ${devices.length}` : ""}</span></div>{devices.length ? <div className="table-wrap"><table><caption className="sr-only">Synthetic device fleet</caption><thead><tr><th>Device</th><th>Office</th><th>Health</th><th>Connectivity</th></tr></thead><tbody>{devices.map((device) => <tr key={device.device_id} onClick={() => openEntity("device", device.device_id)}><td><button className="link-button" onClick={(event) => { event.stopPropagation(); openEntity("device", device.device_id); }}>{device.device_id}</button><small>{device.hostname}</small></td><td>{device.office}</td><td><StatusPill tone={device.status === "healthy" ? "good" : "warn"}>{device.status}</StatusPill></td><td><StatusPill tone={device.vpn_status === "connected" ? "good" : "bad"}>{device.vpn_status}</StatusPill></td></tr>)}</tbody></table></div> : <p className="empty-state">No run devices to display.</p>}</article><article className="panel agent-panel"><div className="section-heading"><div><p className="eyebrow">AGENT INVESTIGATION</p><h2>Investigation activity</h2></div><button disabled={!runId || Boolean(busy)} onClick={invokeHarness}>{busy === "harness" ? "Starting…" : "Start investigation"}</button></div><p className="muted">The operations agent reviews the selected situation, checks the current business state, and explains its recommendation. After an approved change, it checks the result again.</p><p className="hint">{agentTurnCount} reasoning step(s) · {agentToolRequestCount} system check(s) · {toolObservationCount} evidence item(s)</p>{harness ? <pre className="result-box">{harness.text || JSON.stringify(harness, null, 2)}</pre> : <p className="empty-state">Start the investigation after creating a situation.</p>}{harnessSessionId && <p className="hint">This investigation can continue after an approved change.</p>}</article></section>

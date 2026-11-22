@@ -1,5 +1,10 @@
 # Northstar IT Operations
 
+This case study and its implementation were created with substantial
+assistance from AI. AI generated much of the code and helped develop the
+accompanying materials, while I directed the architecture, made the design
+decisions, and reviewed the results. This project is intended as a tutorial.
+
 ## Overview
 
 Northstar represents the internal IT operations and service-management team of

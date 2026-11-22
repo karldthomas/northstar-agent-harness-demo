@@ -186,7 +186,8 @@ def test_harness_api_resumes_the_same_session_after_an_approved_operation(
     class StubClient:
         def invoke(self, context, prompt):
             assert context.scenario_run_id == "demo-vpn"
-            assert context.session_id == "s" * 33
+            assert context.session_id.startswith("northstar-v1-")
+            assert len(context.session_id) >= 33
             assert "Approval ID: APR-42" in prompt
             assert "Do not execute or propose a mutation" in prompt
             return SimpleNamespace(to_dict=lambda: {"session_id": context.session_id, "succeeded": True})
@@ -207,4 +208,21 @@ def test_harness_api_resumes_the_same_session_after_an_approved_operation(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"session_id": "s" * 33, "succeeded": True}
+    assert response.json()["session_id"].startswith("northstar-v1-")
+    assert response.json()["succeeded"] is True
+
+
+def test_harness_invocation_does_not_retry_an_internal_type_error() -> None:
+    calls = 0
+
+    class StubClient:
+        def invoke(self, context, prompt, on_event=None):
+            nonlocal calls
+            del context, prompt, on_event
+            calls += 1
+            raise TypeError("internal invocation failure")
+
+    with pytest.raises(TypeError, match="internal invocation failure"):
+        harness_api._invoke_with_observability(StubClient(), SimpleNamespace(), "prompt")
+
+    assert calls == 1

@@ -25,10 +25,11 @@ export type Scenario = {
 };
 
 export type Summary = {
-  run_id: string;
+  scenario_run_id: string;
   scenario_id: string;
-  created_at: string;
-  state_revision: number;
+  seed: number;
+  revision: number;
+  created_at?: string;
   entity_counts: Record<string, number>;
   device_status_counts: Record<string, number>;
   vpn_status_counts: Record<string, number>;

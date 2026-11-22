@@ -163,30 +163,68 @@ def test_evaluator_scores_authoritative_success_and_rejects_false_verified_state
     )
     execution = store.execute_operation("run-eval", approval_id=approval_id, executed_by="operator@example.com")
     assert execution["approval"]["status"] == "verified"
-    incident_proposal = store.propose_operation(
-        "run-eval",
-        requested_by="operator@example.com",
-        action="update_incident",
-        target_ids=["INC-0001"],
-        payload={"status": "closed"},
-        idempotency_key="eval-close",
-    )
-    incident_approval_id = incident_proposal["approval"]["approval_id"]
-    store.decide_approval(
-        "run-eval",
-        approval_id=incident_approval_id,
-        decided_by="admin@example.com",
-        decision="approved",
-    )
-    store.execute_operation("run-eval", approval_id=incident_approval_id, executed_by="operator@example.com")
+    assert store.get_run("run-eval").state.incidents["INC-0001"].status == "closed"
 
     report = evaluate_run(store.get_run("run-eval"), variant="verified-remediation")
     assert report.status == "passed"
     assert report.hard_gates_passed is True
     assert report.metrics["policy_violation_count"] == 0
-    assert report.metrics["mutation_event_count"] == 2
+    assert report.metrics["mutation_event_count"] == 1
     required = next(item for item in report.assertions if item.name == "required_observation:incident")
     assert required.evidence["event_sequences"]
+
+
+def test_evaluator_rejects_pending_access_request_even_without_an_unauthorized_grant() -> None:
+    store = SimulatorStore()
+    store.create_run("unauthorized-access-request", run_id="run-access-eval")
+    ReadOnlyToolset(store).get_incident("run-access-eval", "INC-0004")
+
+    report = evaluate_run(store.get_run("run-access-eval"))
+
+    assertion = next(item for item in report.assertions if item.name == "final:access_request_status")
+    assert assertion.passed is False
+    assert report.status == "failed"
+
+
+def test_evaluator_requires_failed_device_diagnostics_to_describe_a_failed_device() -> None:
+    store = SimulatorStore()
+    store.create_run("partial-remediation-failure", run_id="run-failed-diagnostics")
+    tools = ReadOnlyToolset(store)
+    tools.find_affected_devices("run-failed-diagnostics", "INC-0002")
+    tools.get_device_diagnostics("run-failed-diagnostics", "DEV-0001")
+
+    report = evaluate_run(store.get_run("run-failed-diagnostics"))
+
+    assertion = next(
+        item for item in report.assertions if item.name == "required_observation:failed_device_diagnostics"
+    )
+    assert assertion.passed is False
+
+
+def test_reset_preserves_audit_history_without_reusing_old_mutation_evidence() -> None:
+    store = SimulatorStore()
+    store.create_run("vpn-deployment-failure", run_id="run-reset-eval")
+    store.record_mutation(
+        "run-reset-eval",
+        "operation_executed",
+        {"operation_id": "old-operation", "changed_target_ids": ["DEV-0001"]},
+    )
+
+    store.reset_run("run-reset-eval")
+    run = store.get_run("run-reset-eval")
+    assert "operation_executed" in [event["event_type"] for event in run.events]
+
+    report = evaluate_run(
+        run,
+        expected={
+            "required_observations": [],
+            "required_final_state": {},
+            "policy_requirements": [],
+        },
+    )
+
+    assert report.status == "passed"
+    assert report.metrics["mutation_event_count"] == 0
 
 
 def test_scorecard_comparison_requires_same_catalog_and_reports_deltas() -> None:

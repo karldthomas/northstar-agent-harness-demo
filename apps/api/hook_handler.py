@@ -3,8 +3,8 @@
 This hook is intentionally narrower than the simulator's direct HTTP API. It
 guards the currently deployed Harness selector: only the six read-only
 Gateway operations may run, and every call must carry an isolated scenario
-run ID. Approval-gated writes remain behind the application API until the
-Harness resumption design is implemented.
+run ID plus its opaque run-bound capability. Approval-gated writes remain
+behind the application API until the Harness resumption design is implemented.
 """
 
 from __future__ import annotations
@@ -13,6 +13,8 @@ import json
 from typing import Any
 
 from harness.configuration import READ_ONLY_TOOL_NAMES
+from simulator.api import store
+from simulator.store import SimulatorError
 
 
 def _tool_name(event: dict[str, Any]) -> str:
@@ -49,7 +51,16 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, str]:
         return {"decision": "deny", "reason": "tool is outside the Northstar read-only Harness allow-list"}
 
     tool_input = _tool_input(event)
-    if tool_input is None or not str(tool_input.get("run_id") or "").strip():
-        return {"decision": "deny", "reason": "every simulator tool call must include a scenario run_id"}
+    run_id = str(tool_input.get("run_id") or "").strip() if tool_input else ""
+    token = str(tool_input.get("gateway_context_token") or "").strip() if tool_input else ""
+    if not run_id or not token:
+        return {
+            "decision": "deny",
+            "reason": "every simulator tool call must include its run_id and Gateway context token",
+        }
+    try:
+        store.verify_gateway_context_token(run_id, token)
+    except SimulatorError:
+        return {"decision": "deny", "reason": "Gateway context token is not valid for this scenario run"}
 
-    return {"decision": "allow", "reason": "read-only simulator tool and scenario run accepted"}
+    return {"decision": "allow", "reason": "read-only simulator tool and run-bound Gateway context accepted"}

@@ -7,6 +7,7 @@ Harness owns model reasoning, tool selection, and orchestration.
 from __future__ import annotations
 
 import json
+import inspect
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -94,17 +95,32 @@ def _client() -> AgentCoreHarnessClient:
 
 def _context(request: HarnessInvocationRequest, principal: Principal | None = None) -> InvocationContext:
     try:
+        tenant_id = (
+            str(principal.claims.get("custom:tenant_id") or "demo").strip() or "demo"
+            if principal
+            else "demo"
+        )
+        gateway_context_token = store.get_gateway_context_token(
+            request.scenario_run_id,
+            actor_id=principal.subject if principal else request.actor_id,
+            tenant_id=tenant_id,
+        )
         return InvocationContext.create(
             request.scenario_run_id,
             session_id=request.session_id,
             user_id=principal.username if principal else request.user_id,
             actor_id=principal.subject if principal else request.actor_id,
+            tenant_id=tenant_id,
+            gateway_context_token=gateway_context_token,
         )
-    except HarnessInvocationError as exc:
+    except (HarnessInvocationError, SimulatorError) as exc:
+        if isinstance(exc, SimulatorError):
+            status_code = 403 if getattr(exc, "code", "") == "RUN_ACCESS_DENIED" else 404
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-def _prompt(request: HarnessInvocationRequest) -> RenderedPrompt:
+def _prompt(request: HarnessInvocationRequest, context: InvocationContext) -> RenderedPrompt:
     resume_fields = (request.approval_id, request.operation_id, request.action)
     if any(value is not None for value in resume_fields):
         if not all(value is not None for value in resume_fields):
@@ -118,17 +134,19 @@ def _prompt(request: HarnessInvocationRequest) -> RenderedPrompt:
             approval_id=request.approval_id or "",
             operation_id=request.operation_id or "",
             action=request.action or "",
+            gateway_context_token=context.gateway_context_token,
         )
     return render_investigation_prompt(
         request.objective,
         scenario_run_id=request.scenario_run_id,
         incident_id=request.incident_id,
+        gateway_context_token=context.gateway_context_token,
     )
 
 
-def _render_prompt(request: HarnessInvocationRequest) -> RenderedPrompt:
+def _render_prompt(request: HarnessInvocationRequest, context: InvocationContext) -> RenderedPrompt:
     try:
-        return _prompt(request)
+        return _prompt(request, context)
     except PromptManagementError as exc:
         raise HTTPException(status_code=503, detail=f"Managed prompt is unavailable: {exc}") from exc
 
@@ -235,15 +253,17 @@ def _record_harness_event(event: HarnessEvent) -> None:
 def _invoke_with_observability(client: Any, context: InvocationContext, prompt: str) -> Any:
     """Invoke a client while remaining compatible with small test doubles."""
 
-    try:
+    # Inspect the callable before invoking it. Catching TypeError around the
+    # call can accidentally execute a real Harness request twice when the
+    # first request raises TypeError internally.
+    parameters = inspect.signature(client.invoke).parameters
+    accepts_callback = "on_event" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    if accepts_callback:
         return client.invoke(context, prompt, on_event=_record_harness_event)
-    except TypeError as exc:
-        if "on_event" not in str(exc):
-            raise
-        # Test doubles written before the callback contract may still return a
-        # completed result. They cannot provide live lifecycle markers, but
-        # retaining compatibility keeps the HTTP boundary easy to exercise.
-        return client.invoke(context, prompt)
+    return client.invoke(context, prompt)
 
 
 @router.post("/invocations")
@@ -256,7 +276,7 @@ def invoke_harness(
     _authorize_run(request, principal)
     client = _client()
     context = _context(request, principal)
-    rendered_prompt = _render_prompt(request)
+    rendered_prompt = _render_prompt(request, context)
     _record_harness_lifecycle(
         request.scenario_run_id,
         "agent_invocation_started",
@@ -355,7 +375,7 @@ def stream_harness(
     _authorize_run(request, principal)
     client = _client()
     context = _context(request, principal)
-    rendered_prompt = _render_prompt(request)
+    rendered_prompt = _render_prompt(request, context)
     _record_harness_lifecycle(
         request.scenario_run_id,
         "agent_invocation_started",

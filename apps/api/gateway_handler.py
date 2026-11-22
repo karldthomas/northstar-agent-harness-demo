@@ -12,8 +12,7 @@ import json
 from typing import Any
 
 from simulator.api import store, tools
-from simulator.fixtures import load_scenarios
-from simulator.store import RunNotFoundError, SimulatorError
+from simulator.store import SimulatorError
 
 
 TOOL_NAMES = {
@@ -62,37 +61,20 @@ def _arguments(event: dict[str, Any]) -> dict[str, Any]:
     return dict(arguments)
 
 
-def _ensure_cloud_suite_run(run_id: str) -> None:
-    """Rehydrate a known cloud-suite fixture on a fresh Lambda container.
+def _authorize_gateway_run(arguments: dict[str, Any]) -> str:
+    """Require the run-bound capability issued by the authenticated API."""
 
-    Phase 1 deliberately uses an in-memory store. The cloud smoke suite uses
-    run IDs with the form ``cloud-<scenario-id>-<nonce>`` so a new Lambda
-    execution can reconstruct the same deterministic read-only fixture without
-    accepting arbitrary scenario IDs or silently creating user-provided runs.
-    """
-
+    run_id = str(arguments.get("run_id") or "").strip()
+    token = str(arguments.get("gateway_context_token") or "").strip()
+    if not run_id:
+        raise ValueError("Gateway tool arguments must include run_id")
+    if not token:
+        raise ValueError("Gateway tool arguments must include gateway_context_token")
     try:
-        store.get_run(run_id)
-        return
-    except RunNotFoundError:
-        pass
-    if not run_id.startswith("cloud-"):
-        return
-    scenario_id = next(
-        (
-            candidate
-            for candidate in load_scenarios()
-            if run_id.startswith(f"cloud-{candidate}-")
-        ),
-        None,
-    )
-    if scenario_id is None:
-        return
-    try:
-        store.create_run(scenario_id, run_id=run_id)
-    except SimulatorError:
-        # A concurrent invocation may have created the same deterministic run.
-        store.get_run(run_id)
+        store.verify_gateway_context_token(run_id, token)
+    except SimulatorError as exc:
+        raise ValueError("Gateway capability is invalid for the requested scenario run") from exc
+    return run_id
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
@@ -101,8 +83,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     agentcore_context = _agentcore_context(context)
     name = _tool_name(event, context)
     arguments = _arguments(event)
-    if "run_id" in arguments:
-        _ensure_cloud_suite_run(str(arguments["run_id"]))
+    run_id = _authorize_gateway_run(arguments)
     request_id = str(
         event.get("request_id")
         or agentcore_context.get("bedrockAgentCoreAwsRequestId")
@@ -111,25 +92,25 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     ) or None
     if name == "check_service_health":
         return tools.check_service_health(
-            str(arguments["run_id"]),
+            run_id,
             service_id=str(arguments.get("service_id") or "svc-vpn-gateway"),
             request_id=request_id,
         ).to_dict()
     if name == "get_device_diagnostics":
         return tools.get_device_diagnostics(
-            str(arguments["run_id"]),
+            run_id,
             device_id=str(arguments["device_id"]),
             request_id=request_id,
         ).to_dict()
     if name == "get_incident":
         return tools.get_incident(
-            str(arguments["run_id"]),
+            run_id,
             incident_id=str(arguments["incident_id"]),
             request_id=request_id,
         ).to_dict()
     if name == "find_affected_devices":
         return tools.find_affected_devices(
-            str(arguments["run_id"]),
+            run_id,
             incident_id=str(arguments["incident_id"]),
             limit=int(arguments.get("limit", 100)),
             request_id=request_id,
@@ -137,13 +118,13 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     if name == "list_recent_deployments":
         application_id = arguments.get("application_id")
         return tools.list_recent_deployments(
-            str(arguments["run_id"]),
+            run_id,
             application_id=str(application_id) if application_id else None,
             limit=int(arguments.get("limit", 10)),
             request_id=request_id,
         ).to_dict()
     return tools.search_knowledge(
-        str(arguments["run_id"]),
+        run_id,
         query=str(arguments["query"]),
         limit=int(arguments.get("limit", 5)),
         request_id=request_id,

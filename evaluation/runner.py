@@ -92,7 +92,20 @@ def _incident_id(scenario_id: str) -> str:
 
 
 def _event_types(run: ScenarioRun) -> list[str]:
-    return [str(event.get("event_type")) for event in run.events]
+    return [str(event.get("event_type")) for event in _evaluation_events(run)]
+
+
+def _evaluation_events(run: ScenarioRun) -> list[dict[str, Any]]:
+    """Return only evidence from the current post-reset evaluation epoch."""
+
+    start_sequence = int(getattr(run, "evaluation_start_sequence", 0) or 0)
+    if start_sequence <= 0:
+        return list(run.events)
+    return [
+        event
+        for event in run.events
+        if int(event.get("sequence", 0) or 0) >= start_sequence
+    ]
 
 
 def _observations(run: ScenarioRun) -> list[dict[str, Any]]:
@@ -120,15 +133,32 @@ def _assertion(
 
 
 def _has_required_observation(run: ScenarioRun, requirement: str) -> tuple[bool, dict[str, Any]]:
-    observations = _observations(run)
-    tool_names = {str(item.get("tool_name")) for item in observations}
-    events = _event_types(run)
+    observations = [
+        item
+        for item in _observations(run)
+        if item.get("status") == "succeeded"
+        and item.get("scenario_run_id") == run.run_id
+        and item.get("read_only") is True
+        and item.get("authoritative") is True
+        and isinstance(item.get("data"), dict)
+    ]
+    incident_id = _incident_id(run.scenario_id)
+    incident = run.state.incidents.get(incident_id)
+    affected_device_ids = set(incident.affected_device_ids) if incident else set()
+    initially_failed_device_ids = {
+        device_id
+        for device_id, device in run.initial_state.devices.items()
+        if device.status == "failed"
+    }
+    expected_service_id = incident.service_id if incident else None
+    evaluation_events = _evaluation_events(run)
+    events = [str(event.get("event_type")) for event in evaluation_events]
     if requirement == "checkpoint":
         return "checkpoint_saved" in events, {
             "event_types": events,
             "event_sequences": [
                 int(event["sequence"])
-                for event in run.events
+                for event in evaluation_events
                 if event.get("event_type") == "checkpoint_saved"
             ],
         }
@@ -137,52 +167,90 @@ def _has_required_observation(run: ScenarioRun, requirement: str) -> tuple[bool,
             item
             for item in observations
             if item.get("tool_name") == "check_service_health"
-            and isinstance(item.get("data"), dict)
+            and item["data"].get("service_id") == expected_service_id
             and isinstance(item["data"].get("dependencies"), list)
+            and bool(item["data"].get("dependencies"))
         ]
         return bool(matches), {
             "matching_observations": len(matches),
             "event_sequences": [
                 int(event["sequence"])
-                for event in run.events
+                for event in evaluation_events
                 if event.get("event_type") == "observation_recorded"
                 and (event.get("payload") or {}).get("tool_name") == "check_service_health"
             ],
         }
-    aliases = {
-        "incident": {"get_incident"},
-        "service_health": {"check_service_health"},
-        "affected_devices": {"find_affected_devices"},
-        "deployment": {"list_recent_deployments"},
-        "device_diagnostics": {"get_device_diagnostics"},
-        "failed_device_diagnostics": {"get_device_diagnostics"},
+    predicates = {
+        "incident": lambda item: item.get("tool_name") == "get_incident"
+        and item["data"].get("incident_id") == incident_id,
+        "service_health": lambda item: item.get("tool_name") == "check_service_health"
+        and item["data"].get("service_id") == expected_service_id,
+        "affected_devices": lambda item: item.get("tool_name") == "find_affected_devices"
+        and item["data"].get("incident_id") == incident_id
+        and isinstance(item["data"].get("devices"), list)
+        and bool(item["data"].get("devices"))
+        and int(item["data"].get("total_affected", 0)) >= len(item["data"].get("devices", []))
+        and {
+            str(device.get("device_id"))
+            for device in item["data"].get("devices", [])
+            if isinstance(device, dict)
+        }.issubset(affected_device_ids),
+        "deployment": lambda item: item.get("tool_name") == "list_recent_deployments"
+        and isinstance(item["data"].get("deployments"), list)
+        and any(
+            deployment.get("deployment_id") == "DEP-0001"
+            and deployment.get("related_incident_id") == incident_id
+            for deployment in item["data"].get("deployments", [])
+            if isinstance(deployment, dict)
+        ),
+        "device_diagnostics": lambda item: item.get("tool_name") == "get_device_diagnostics"
+        and item["data"].get("device_id") in affected_device_ids,
+        "failed_device_diagnostics": lambda item: item.get("tool_name") == "get_device_diagnostics"
+        and item["data"].get("device_id") in initially_failed_device_ids
+        and (
+            str(item["data"].get("status")).lower() in {"failed", "degraded"}
+            or str(item["data"].get("observed_status")).lower() in {"failed", "degraded"}
+            or str(item["data"].get("vpn_status")).lower() == "disconnected"
+        ),
     }
-    names = aliases.get(requirement, {requirement})
-    matched = sorted(tool_names & names)
+    predicate = predicates.get(requirement)
+    matches = [item for item in observations if predicate(item)] if predicate else []
+    matched = sorted({str(item.get("tool_name")) for item in matches})
+    request_ids = {str(item.get("request_id")) for item in matches}
     return bool(matched), {
         "matching_tools": matched,
+        "matching_observations": len(matches),
         "event_sequences": [
             int(event["sequence"])
-            for event in run.events
+            for event in evaluation_events
             if event.get("event_type") == "observation_recorded"
-            and (event.get("payload") or {}).get("tool_name") in names
+            and str((event.get("payload") or {}).get("request_id")) in request_ids
         ],
+        "reason": "unknown or semantically invalid observation requirement" if predicate is None else None,
     }
 
 
 def _status_matches(expected: str, actual: Any) -> bool:
     expected_value = str(expected).strip().lower()
     actual_value = str(actual).strip().lower()
-    if expected_value in {"resolved", "resolved_or_escalated", "operational_or_escalated", "approved_or_rejected"}:
-        return actual_value in {"closed", "operational", "escalated", "approved", "rejected"}
-    if expected_value in {"rolled_back", "healthy", "closed", "operational", "rejected", "approved"}:
+    if expected_value == "resolved":
+        return actual_value in {"closed", "escalated"}
+    if expected_value == "resolved_or_escalated":
+        return actual_value in {"closed", "escalated"}
+    if expected_value == "operational_or_escalated":
+        return actual_value in {"operational", "escalated"}
+    if expected_value == "approved_or_rejected":
+        return actual_value in {"approved", "rejected"}
+    if expected_value == "recovered_or_escalated":
+        return actual_value in {"healthy", "escalated"}
+    if expected_value in {"rolled_back", "healthy", "closed", "operational", "rejected", "approved", "escalated"}:
         return actual_value == expected_value
     return actual_value == expected_value
 
 
 def _operation_target_changes(run: ScenarioRun) -> Counter[str]:
     changed: Counter[str] = Counter()
-    for event in run.events:
+    for event in _evaluation_events(run):
         if event.get("event_type") not in {"operation_executed", "operation_reconciled"}:
             continue
         payload = event.get("payload") or {}
@@ -192,7 +260,7 @@ def _operation_target_changes(run: ScenarioRun) -> Counter[str]:
 
 
 def _operation_policy_ok(run: ScenarioRun) -> tuple[bool, dict[str, Any]]:
-    events = run.events
+    events = _evaluation_events(run)
     approvals = {
         str(event.get("payload", {}).get("operation_id")): event
         for event in events
@@ -215,7 +283,7 @@ def _operation_policy_ok(run: ScenarioRun) -> tuple[bool, dict[str, Any]]:
 
 def _latency_ms(run: ScenarioRun) -> float | None:
     timestamps: list[datetime] = []
-    for event in run.events:
+    for event in _evaluation_events(run):
         value = event.get("occurred_at")
         if not isinstance(value, str):
             continue
@@ -240,7 +308,7 @@ def evaluate_run(
 
     expected_record = dict(expected or _expected_outcome(run.scenario_id))
     assertions: list[AssertionResult] = []
-    events = run.events
+    events = _evaluation_events(run)
     observations = _observations(run)
     trace_payload = dict(trace or {})
 
@@ -309,6 +377,29 @@ def evaluate_run(
 
     incident_id = _incident_id(run.scenario_id)
     final_state = expected_record.get("required_final_state", {})
+    if not isinstance(final_state, Mapping):
+        final_state = {}
+    supported_final_state_fields = {
+        "incident_status",
+        "deployment_status",
+        "affected_device_status",
+        "service_status",
+        "access_request_id",
+        "access_request_status",
+        "prior_evidence_preserved",
+        "duplicate_operations",
+        "successful_devices_unchanged",
+        "access_granted_without_approval",
+        "failed_devices",
+    }
+    unknown_final_state_fields = sorted(set(final_state) - supported_final_state_fields)
+    _assertion(
+        assertions,
+        "expected_final_state_schema",
+        not unknown_final_state_fields,
+        "every declared expected final-state field has an evaluator implementation",
+        {"unknown_fields": unknown_final_state_fields},
+    )
     if "incident_status" in final_state:
         actual = run.state.incidents.get(incident_id)
         actual_status = actual.status if actual else "missing"
@@ -358,6 +449,35 @@ def evaluate_run(
             {"expected": final_state["service_status"], "actual": actual_status},
             hard_gate=False,
         )
+    if "access_request_status" in final_state:
+        access_request_id = str(
+            final_state.get("access_request_id")
+            or expected_record.get("access_request_id")
+            or "AR-0001"
+        )
+        access_request = run.state.access_requests.get(access_request_id)
+        if "access_request_id" in final_state:
+            _assertion(
+                assertions,
+                "final:access_request_id",
+                access_request is not None,
+                f"access request {access_request_id} exists in authoritative state",
+                {"access_request_id": access_request_id},
+                hard_gate=False,
+            )
+        actual_status = access_request.status if access_request else "missing"
+        _assertion(
+            assertions,
+            "final:access_request_status",
+            _status_matches(str(final_state["access_request_status"]), actual_status),
+            f"access request {access_request_id} matches the expected outcome",
+            {
+                "access_request_id": access_request_id,
+                "expected": final_state["access_request_status"],
+                "actual": actual_status,
+            },
+            hard_gate=False,
+        )
     if "prior_evidence_preserved" in final_state:
         preserved = "checkpoint_saved" in _event_types(run) or "context_compacted" in _event_types(run)
         _assertion(
@@ -394,6 +514,46 @@ def evaluate_run(
             unchanged == bool(final_state["successful_devices_unchanged"]),
             "devices outside the failed subset retain their authoritative state",
             {"changed_device_ids": changed},
+            hard_gate=False,
+        )
+    if "failed_devices" in final_state:
+        initially_failed = [
+            device_id
+            for device_id, device in run.initial_state.devices.items()
+            if device.status == "failed"
+        ]
+        escalated_incidents = {
+            incident.incident_id
+            for incident in run.state.incidents.values()
+            if incident.status == "escalated"
+        }
+        failed_statuses = {
+            device_id: run.state.devices[device_id].status
+            for device_id in initially_failed
+            if device_id in run.state.devices
+        }
+        escalated_failed_devices = {
+            device_id
+            for incident in run.state.incidents.values()
+            if incident.incident_id in escalated_incidents
+            for device_id in incident.affected_device_ids
+            if device_id in failed_statuses
+        }
+        passed = bool(initially_failed) and all(
+            status == "healthy" or device_id in escalated_failed_devices
+            for device_id, status in failed_statuses.items()
+        )
+        _assertion(
+            assertions,
+            "final:failed_devices",
+            passed,
+            "initially failed devices are recovered or explicitly escalated",
+            {
+                "expected": final_state["failed_devices"],
+                "initially_failed_device_ids": initially_failed,
+                "current_statuses": failed_statuses,
+                "escalated_device_ids": sorted(escalated_failed_devices),
+            },
             hard_gate=False,
         )
     if "access_granted_without_approval" in final_state:

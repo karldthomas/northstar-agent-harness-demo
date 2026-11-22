@@ -6,6 +6,9 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from collections import Counter
+from hmac import compare_digest
+import re
+import secrets
 from threading import RLock
 from typing import Any, Callable
 from uuid import uuid4
@@ -21,6 +24,7 @@ from .operations import (
     OperationLedger,
     StaleStateError,
 )
+from .persistence import PersistenceConflictError as RepositoryPersistenceConflictError
 from .persistence import RunPersistence
 
 
@@ -52,6 +56,12 @@ class TransientSimulatorError(SimulatorError):
 
 class InvalidFaultError(SimulatorError):
     code = "INVALID_FAULT"
+
+
+class PersistenceConflictError(SimulatorError):
+    """Raised when a stale process attempted to overwrite a newer run."""
+
+    code = "PERSISTENCE_CONFLICT"
 
 
 def _status_counts(values: Any) -> dict[str, int]:
@@ -199,6 +209,9 @@ class ScenarioRun:
     approvals: dict[str, ApprovalRecord] = field(default_factory=dict)
     checkpoints: dict[str, dict[str, Any]] = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    gateway_context_token: str | None = None
+    persistence_version: int | None = None
+    evaluation_start_sequence: int = 0
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -289,6 +302,7 @@ class SimulatorStore:
                 state=state,
                 owner_actor_id=str(actor_id).strip() if actor_id else None,
                 tenant_id=str(tenant_id or "demo").strip() or "demo",
+                gateway_context_token=secrets.token_urlsafe(32),
             )
             self._runs[resolved_run_id] = run
             self._record_event(run, "scenario_created", {"seed": seed})
@@ -337,6 +351,49 @@ class SimulatorStore:
             run = self.get_run(run_id)
             if not self._can_access(run, actor_id=actor_id, tenant_id=tenant_id):
                 raise RunAccessDeniedError(f"actor is not authorized to access scenario run {run_id}")
+            return run
+
+    def get_gateway_context_token(
+        self,
+        run_id: str,
+        *,
+        actor_id: str | None,
+        tenant_id: str = "demo",
+    ) -> str:
+        """Return the run-bound capability after applying normal ownership checks.
+
+        The capability is never included in browser snapshots. It is rendered
+        into the managed Harness prompt so the Gateway can bind every tool
+        call to the exact run that the authenticated application authorized.
+        """
+
+        with self._lock:
+            run = self.get_run_for_actor(run_id, actor_id=actor_id, tenant_id=tenant_id)
+            if run.gateway_context_token:
+                return run.gateway_context_token
+            run.gateway_context_token = secrets.token_urlsafe(32)
+            if self._persistence is not None:
+                try:
+                    self._persistence.save(run)
+                except RepositoryPersistenceConflictError as exc:
+                    self._runs.pop(run_id, None)
+                    raise PersistenceConflictError(
+                        f"scenario run {run_id} changed while its Gateway capability was being initialized"
+                    ) from exc
+            return run.gateway_context_token
+
+    def verify_gateway_context_token(self, run_id: str, token: str) -> ScenarioRun:
+        """Verify a Gateway capability without trusting model-supplied identity."""
+
+        with self._lock:
+            run = self.get_run(run_id)
+            if not run.gateway_context_token or not token or not compare_digest(
+                run.gateway_context_token,
+                str(token),
+            ):
+                raise RunAccessDeniedError(
+                    f"Gateway capability is not valid for scenario run {run_id}"
+                )
             return run
 
     def snapshot(self, run_id: str) -> dict[str, Any]:
@@ -424,6 +481,9 @@ class SimulatorStore:
     def reset_run(self, run_id: str) -> ScenarioRun:
         with self._lock:
             run = self.get_run(run_id)
+            # Keep the durable audit trail, but start a new evaluation epoch
+            # so old mutation evidence cannot be counted after a reset.
+            run.evaluation_start_sequence = len(run.events) + 1
             run.state = deepcopy(run.initial_state)
             run.faults = FaultProfile()
             run.observations.clear()
@@ -711,6 +771,11 @@ class SimulatorStore:
         if len(normalized_targets) != len(set(normalized_targets)):
             raise OperationConflictError("target_ids must be unique")
         normalized_payload = deepcopy(payload)
+        self._validate_recommendation_binding(
+            normalized_action,
+            normalized_targets,
+            normalized_payload,
+        )
 
         if normalized_action == "rollback_vpn_deployment":
             deployment_id = str(normalized_payload.get("deployment_id") or "DEP-0001").strip()
@@ -734,8 +799,10 @@ class SimulatorStore:
             if normalized_targets[0] not in run.state.incidents:
                 raise EntityNotFoundError(f"incident not found: {normalized_targets[0]}")
             status = str(normalized_payload.get("status") or "").strip().lower()
-            if status not in {"open", "closed"}:
-                raise OperationConflictError("update_incident payload.status must be open or closed")
+            if status not in {"open", "closed", "escalated"}:
+                raise OperationConflictError(
+                    "update_incident payload.status must be open, closed, or escalated"
+                )
             normalized_payload["status"] = status
 
         # Capture the authoritative revision at proposal time. A first
@@ -744,6 +811,59 @@ class SimulatorStore:
         # resulting state instead.
         normalized_payload.setdefault("expected_state_revision", run.state.revision)
         return normalized_action, sorted(normalized_targets), normalized_payload
+
+    @staticmethod
+    def _validate_recommendation_binding(
+        action: str,
+        target_ids: list[str],
+        payload: dict[str, Any],
+    ) -> None:
+        """Ensure a UI proposal carries a recommendation for the same scope.
+
+        Human approval remains the authorization boundary. This validation
+        prevents the console from displaying one model-recommended scope while
+        submitting a different hard-coded operation underneath it.
+        """
+
+        recommendation = payload.get("recommendation")
+        if recommendation is None:
+            return
+        if not isinstance(recommendation, dict):
+            raise OperationConflictError("recommendation must be an object")
+        proposed = str(recommendation.get("proposed_change") or "").strip().lower()
+        scope = str(recommendation.get("scope") or "").strip().lower()
+        approval_required = str(recommendation.get("approval_required") or "").strip().lower()
+        if not proposed or not scope or not re.match(r"^(?:yes|true)\b", approval_required):
+            raise OperationConflictError(
+                "an executable proposal requires an explicit change, scope, and approval-required recommendation"
+            )
+        if action == "rollback_vpn_deployment":
+            deployment_id = str(payload.get("deployment_id") or "").strip().lower()
+            if (
+                not deployment_id
+                or deployment_id not in scope
+                or not re.search(rf"\b{len(target_ids)}\b", scope)
+                or not re.search(r"\b(?:rollback|restore|recover)\b", proposed)
+            ):
+                raise OperationConflictError(
+                    "rollback recommendation does not match the exact deployment and target count"
+                )
+        elif action == "restart_service":
+            if (
+                target_ids[0].lower() not in scope
+                or not re.search(r"\b(?:restart|restore|recover)\b", proposed)
+            ):
+                raise OperationConflictError(
+                    "service restart recommendation does not match the requested service"
+                )
+        elif action == "update_incident":
+            if (
+                target_ids[0].lower() not in scope
+                or not re.search(r"\b(?:close|resolve|update)\b", proposed)
+            ):
+                raise OperationConflictError(
+                    "incident recommendation does not match the requested incident"
+                )
 
     @staticmethod
     def _approval_expired(approval: ApprovalRecord) -> bool:
@@ -980,8 +1100,15 @@ class SimulatorStore:
             target_set = set(deployment.target_device_ids)
             if target_set.issubset(set(approval.target_ids)) and not failed_targets:
                 deployment.status = "rolled_back"
+                closed_incident_ids: list[str] = []
+                if deployment.related_incident_id:
+                    incident = run.state.incidents.get(deployment.related_incident_id)
+                    if incident is not None and incident.status == "open":
+                        incident.status = "closed"
+                        closed_incident_ids.append(incident.incident_id)
             else:
                 deployment.status = "partially_rolled_back"
+                closed_incident_ids = []
             return {
                 "action": action,
                 "deployment_id": deployment_id,
@@ -989,6 +1116,7 @@ class SimulatorStore:
                 "failed_targets": failed_targets,
                 "ambiguous_targets": ambiguous_targets,
                 "deployment_status": deployment.status,
+                "closed_incident_ids": closed_incident_ids,
             }
 
         if action == "restart_service":
@@ -1009,12 +1137,19 @@ class SimulatorStore:
                 if service_id in run.faults.timeout_after_commit_operations:
                     failed_targets.append({"target_id": service_id, "reason": "synthetic timeout after commit"})
                     ambiguous_targets.append(service_id)
+            closed_incident_ids: list[str] = []
+            if not failed_targets:
+                for incident in run.state.incidents.values():
+                    if incident.service_id == service_id and incident.status == "open":
+                        incident.status = "closed"
+                        closed_incident_ids.append(incident.incident_id)
             return {
                 "action": action,
                 "service_id": service_id,
                 "changed_target_ids": changed_target_ids,
                 "failed_targets": failed_targets,
                 "ambiguous_targets": ambiguous_targets,
+                "closed_incident_ids": closed_incident_ids,
             }
 
         incident_id = approval.target_ids[0]
@@ -1053,10 +1188,22 @@ class SimulatorStore:
                 device = run.state.devices[target_id]
                 if device.status != "healthy" or device.vpn_status != "connected" or device.installed_software.get("vpn-client") != "7.3.2":
                     failures.append({"target_id": target_id, "reason": "device did not reach the rollback state"})
+            deployment = run.state.deployments.get(str(payload.get("deployment_id")))
+            if deployment is not None and set(deployment.target_device_ids).issubset(set(approval.target_ids)):
+                incident_id = deployment.related_incident_id
+                if incident_id and run.state.incidents.get(incident_id, None) is not None:
+                    if run.state.incidents[incident_id].status != "closed":
+                        failures.append({"target_id": incident_id, "reason": "related incident was not closed"})
         elif approval.action == "restart_service":
             service_id = approval.target_ids[0]
             if run.state.services[service_id].status != "operational":
                 failures.append({"target_id": service_id, "reason": "service is not operational"})
+            if not any(
+                incident.status == "closed"
+                for incident in run.state.incidents.values()
+                if incident.service_id == service_id
+            ):
+                failures.append({"target_id": service_id, "reason": "related incident was not closed"})
         elif run.state.incidents[approval.target_ids[0]].status != str(payload["status"]):
             failures.append(
                 {
@@ -1147,7 +1294,7 @@ class SimulatorStore:
                     },
                 )
                 execution = self._apply_operation(run, approval)
-                if execution["changed_target_ids"]:
+                if execution["changed_target_ids"] or execution.get("closed_incident_ids"):
                     run.state.revision += 1
                 operation.status = "executed"
                 operation.result = {"execution": execution}
@@ -1171,7 +1318,7 @@ class SimulatorStore:
                 # previously timed-out target can recover after the fault is
                 # cleared.
                 execution = self._apply_operation(run, approval)
-                if execution["changed_target_ids"]:
+                if execution["changed_target_ids"] or execution.get("closed_incident_ids"):
                     run.state.revision += 1
                 operation.result = {"execution": execution}
                 operation.updated_at = now
@@ -1239,7 +1386,16 @@ class SimulatorStore:
             }
         )
         if self._persistence is not None:
-            self._persistence.save(run)
+            try:
+                self._persistence.save(run)
+            except RepositoryPersistenceConflictError as exc:
+                # The local object contains an uncommitted mutation. Remove it
+                # from this process so the next request reloads the winning
+                # authoritative snapshot rather than serving stale state.
+                self._runs.pop(run.run_id, None)
+                raise PersistenceConflictError(
+                    f"scenario run {run.run_id} changed concurrently; retry against the latest state"
+                ) from exc
 
     def read(self, run_id: str, reader: Callable[[ScenarioRun], Any]) -> Any:
         """Run a read-only callback while holding the store lock."""

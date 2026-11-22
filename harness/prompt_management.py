@@ -410,6 +410,9 @@ class PromptManager:
             payload = self._get_prompt(key, version_arn=selected_arn)
         fields = _fields_from_prompt(payload)
         variables: dict[str, Any] = {str(name): value for name, value in context.items()}
+        # Older local callers and prompt previews do not need Gateway access;
+        # runtime Harness callers replace this with the opaque run capability.
+        variables.setdefault("gateway_context_token", "")
         variables["input"] = json.dumps(dict(context), indent=2, sort_keys=True)
         user = render_template(fields["user"], variables)
         system = render_template(fields["system"], variables) if fields["system"] else ""

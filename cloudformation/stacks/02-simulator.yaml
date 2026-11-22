@@ -11,7 +11,7 @@ Parameters:
 Globals:
   Function:
     Runtime: python3.12
-    Timeout: 30
+    Timeout: 180
     MemorySize: 1024
     Architectures:
       - arm64
@@ -191,6 +191,7 @@ Resources:
       Action: lambda:InvokeFunction
       FunctionName: !Ref SimulatorFunction
       Principal: bedrock-agentcore.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
 
   HarnessHookFunction:
     Type: AWS::Serverless::Function
@@ -208,6 +209,7 @@ Resources:
       Action: lambda:InvokeFunction
       FunctionName: !Ref HarnessHookFunction
       Principal: bedrock-agentcore.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
 
 Outputs:
   EnvironmentName:

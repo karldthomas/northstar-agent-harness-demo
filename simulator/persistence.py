@@ -29,6 +29,10 @@ from .operations import ApprovalRecord, OperationLedger, OperationRecord
 PERSISTENCE_SCHEMA = "northstar.scenario-run.v1"
 
 
+class PersistenceConflictError(RuntimeError):
+    """Raised when an optimistic-concurrency write loses a race."""
+
+
 class RunPersistence(Protocol):
     """Minimal persistence contract consumed by ``SimulatorStore``."""
 
@@ -36,7 +40,7 @@ class RunPersistence(Protocol):
         """Load one run, or return ``None`` when it does not exist."""
 
     def save(self, run: Any) -> None:
-        """Persist the current run snapshot."""
+        """Persist the current run snapshot or raise on a stale version."""
 
     def list_run_ids(self) -> list[str]:
         """Return persisted run IDs."""
@@ -91,6 +95,9 @@ def serialize_run(run: Any) -> dict[str, Any]:
         "state": run.state.to_dict(),
         "owner_actor_id": run.owner_actor_id,
         "tenant_id": run.tenant_id,
+        "gateway_context_token": run.gateway_context_token,
+        "persistence_version": getattr(run, "persistence_version", None),
+        "evaluation_start_sequence": getattr(run, "evaluation_start_sequence", 0),
         "faults": run.faults.to_dict(),
         "events": deepcopy(run.events),
         "observations": deepcopy(run.observations),
@@ -159,6 +166,7 @@ def deserialize_run(payload: dict[str, Any]) -> Any:
         state=_state_from_dict(dict(normalized["state"])),
         owner_actor_id=normalized.get("owner_actor_id"),
         tenant_id=str(normalized.get("tenant_id") or "demo"),
+        gateway_context_token=normalized.get("gateway_context_token"),
         faults=FaultProfile(
             **{
                 key: set(str(value) for value in values)
@@ -170,6 +178,7 @@ def deserialize_run(payload: dict[str, Any]) -> Any:
         operations=operations,
         approvals=approvals,
         checkpoints=deepcopy(dict(normalized.get("checkpoints") or {})),
+        evaluation_start_sequence=int(normalized.get("evaluation_start_sequence") or 0),
         created_at=str(normalized.get("created_at") or ""),
     )
 
@@ -198,16 +207,47 @@ class DynamoDBRunRepository:
         response = self.table.get_item(Key=self._key(run_id), ConsistentRead=True)
         item = response.get("Item") or {}
         payload = item.get("payload")
-        return deserialize_run(dict(payload)) if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            return None
+        run = deserialize_run(dict(payload))
+        # The top-level version is deliberately separate from the payload so
+        # the conditional write remains small and easy to inspect in DynamoDB.
+        run.persistence_version = int(item.get("persistence_version", 0))
+        return run
 
     def save(self, run: Any) -> None:
-        self.table.put_item(
-            Item={
-                **self._key(str(run.run_id)),
-                "schema_version": PERSISTENCE_SCHEMA,
-                "payload": serialize_run(run),
-            }
-        )
+        expected_version = getattr(run, "persistence_version", None)
+        next_version = 1 if expected_version is None else int(expected_version) + 1
+        payload = serialize_run(run)
+        payload["persistence_version"] = next_version
+        item = {
+            **self._key(str(run.run_id)),
+            "schema_version": PERSISTENCE_SCHEMA,
+            "persistence_version": next_version,
+            "payload": payload,
+        }
+        if expected_version is None:
+            condition = "attribute_not_exists(#version)"
+            values: dict[str, Any] = {}
+        else:
+            condition = "attribute_not_exists(#version) OR #version = :expected"
+            values = {":expected": int(expected_version)}
+        try:
+            self.table.put_item(
+                Item=item,
+                ConditionExpression=condition,
+                ExpressionAttributeNames={"#version": "persistence_version"},
+                **({"ExpressionAttributeValues": values} if values else {}),
+            )
+        except Exception as exc:
+            response = getattr(exc, "response", {})
+            error = response.get("Error", {}) if isinstance(response, dict) else {}
+            if error.get("Code") == "ConditionalCheckFailedException":
+                raise PersistenceConflictError(
+                    f"scenario run {run.run_id} has a newer persisted version"
+                ) from exc
+            raise
+        run.persistence_version = next_version
 
     def list_run_ids(self) -> list[str]:
         run_ids: list[str] = []

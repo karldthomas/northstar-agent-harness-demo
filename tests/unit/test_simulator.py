@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import pytest
+
 from simulator.fixtures import build_environment, load_scenarios
 from simulator.operations import OperationConflictError, OperationLedger
-from simulator.persistence import DynamoDBRunRepository
-from simulator.store import SimulatorStore
+from simulator.persistence import DynamoDBRunRepository, PersistenceConflictError as RepositoryPersistenceConflictError
+from simulator.store import PersistenceConflictError, SimulatorStore
 from simulator.tools import ReadOnlyToolset
 from simulator.validation import validate_environment
 
@@ -17,8 +19,27 @@ class FakeDynamoTable:
         item = self.items.get((Key["scenario_run_id"], Key["record_key"]))
         return {"Item": item} if item is not None else {}
 
-    def put_item(self, *, Item: dict[str, object]) -> None:
-        self.items[(str(Item["scenario_run_id"]), str(Item["record_key"]))] = Item
+    def put_item(
+        self,
+        *,
+        Item: dict[str, object],
+        ConditionExpression: str | None = None,
+        ExpressionAttributeNames: dict[str, str] | None = None,
+        ExpressionAttributeValues: dict[str, object] | None = None,
+    ) -> None:
+        del ExpressionAttributeNames
+        key = (str(Item["scenario_run_id"]), str(Item["record_key"]))
+        existing = self.items.get(key)
+        if ConditionExpression and existing is not None:
+            expected = (ExpressionAttributeValues or {}).get(":expected")
+            version = existing.get("persistence_version")
+            allows_missing = "attribute_not_exists" in ConditionExpression and version is None
+            allows_expected = expected is not None and version == expected
+            if not (allows_missing or allows_expected):
+                error = RuntimeError("conditional check failed")
+                error.response = {"Error": {"Code": "ConditionalCheckFailedException"}}
+                raise error
+        self.items[key] = Item
 
     def scan(self, **kwargs: object) -> dict[str, object]:
         del kwargs
@@ -99,6 +120,39 @@ def test_dynamodb_run_repository_shares_state_and_harness_events_between_store_i
     assert page["events"][0]["payload"]["turn_index"] == 1
     assert page["events"][1]["payload"]["tool_name"] == "check_service_health"
     assert api_store.get_run("run-persisted").owner_actor_id == "actor-1"
+
+
+def test_dynamodb_repository_rejects_stale_whole_snapshot_writes() -> None:
+    table = FakeDynamoTable()
+    repository = DynamoDBRunRepository("northstar-test-scenario-state", table=table)
+    winner_store = SimulatorStore(persistence=repository)
+    stale_store = SimulatorStore(persistence=repository)
+    winner_store.create_run("vpn-deployment-failure", run_id="run-concurrent")
+    stale_run = stale_store.get_run("run-concurrent")
+
+    winner_store.record_harness_event("run-concurrent", "winner_event", {"request_id": "winner"})
+
+    with pytest.raises(PersistenceConflictError):
+        stale_store._record_event(stale_run, "stale_event", {"request_id": "stale"})
+
+    persisted = repository.load("run-concurrent")
+    assert persisted is not None
+    event_types = [event["event_type"] for event in persisted.events]
+    assert "winner_event" in event_types
+    assert "stale_event" not in event_types
+
+
+def test_repository_maps_dynamodb_conditional_failure_to_a_stable_error() -> None:
+    table = FakeDynamoTable()
+    repository = DynamoDBRunRepository("northstar-test-scenario-state", table=table)
+    store = SimulatorStore(persistence=repository)
+    store.create_run("vpn-deployment-failure", run_id="run-repository-error")
+    stale = repository.load("run-repository-error")
+    assert stale is not None
+    store.record_harness_event("run-repository-error", "newer_event", {})
+
+    with pytest.raises(RepositoryPersistenceConflictError):
+        repository.save(stale)
 
 
 def test_faults_are_scoped_to_one_run_and_reset_restores_baseline() -> None:

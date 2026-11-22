@@ -65,6 +65,30 @@ def test_proposal_is_immutable_and_execution_requires_approval() -> None:
     assert store.get_run("run-approval").state.revision == before_revision + 1
 
 
+def test_full_vpn_rollback_closes_the_related_incident() -> None:
+    store = SimulatorStore()
+    run = store.create_run("vpn-deployment-failure", run_id="run-full-rollback")
+    targets = list(run.state.incidents["INC-0001"].affected_device_ids)
+    proposal = _propose(store, "run-full-rollback", key="full-rollback", targets=targets)
+    approval_id = proposal["approval"]["approval_id"]
+    store.decide_approval(
+        "run-full-rollback",
+        approval_id=approval_id,
+        decided_by="admin@example.com",
+        decision="approved",
+    )
+
+    result = store.execute_operation(
+        "run-full-rollback",
+        approval_id=approval_id,
+        executed_by="operator@example.com",
+    )
+
+    assert result["approval"]["status"] == "verified"
+    assert store.get_run("run-full-rollback").state.deployments["DEP-0001"].status == "rolled_back"
+    assert store.get_run("run-full-rollback").state.incidents["INC-0001"].status == "closed"
+
+
 def test_idempotency_returns_the_same_approval_without_reapplying_state() -> None:
     store = SimulatorStore()
     store.create_run("vpn-deployment-failure", run_id="run-idempotent")
@@ -78,6 +102,28 @@ def test_idempotency_returns_the_same_approval_without_reapplying_state() -> Non
 
     with pytest.raises(OperationConflictError):
         _propose(store, "run-idempotent", key="same-request", targets=["DEV-0003"])
+
+
+def test_recommendation_scope_must_match_the_approved_operation() -> None:
+    store = SimulatorStore()
+    store.create_run("vpn-deployment-failure", run_id="run-recommendation")
+
+    with pytest.raises(OperationConflictError, match="recommendation"):
+        store.propose_operation(
+            "run-recommendation",
+            requested_by="operator@example.com",
+            action="rollback_vpn_deployment",
+            target_ids=["DEV-0001", "DEV-0002"],
+            payload={
+                "deployment_id": "DEP-0001",
+                "recommendation": {
+                    "proposed_change": "Restart the payments service",
+                    "scope": "svc-payments / INC-0003",
+                    "approval_required": "Yes",
+                },
+            },
+            idempotency_key="recommendation-mismatch",
+        )
 
 
 def test_rejected_and_expired_approvals_do_not_mutate_state() -> None:

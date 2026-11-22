@@ -167,6 +167,29 @@ def _create_cloud_suite_run(
     return run_id, result
 
 
+def _persisted_gateway_context_token(run_id: str, context_path: Path) -> str | None:
+    """Read the opaque run capability without exposing it in API snapshots."""
+
+    from simulator.persistence import DynamoDBRunRepository
+
+    context = json.loads(context_path.read_text(encoding="utf-8"))
+    table_name = str(
+        os.environ.get("NORTHSTAR_STATE_TABLE_NAME")
+        or context.get("CF_OUT_ScenarioStateTableName")
+        or ""
+    ).strip()
+    if not table_name:
+        return None
+    repository = DynamoDBRunRepository(
+        table_name,
+        region=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"),
+    )
+    run = repository.load(run_id)
+    if run is None or not run.gateway_context_token:
+        return None
+    return run.gateway_context_token
+
+
 def _cloud_suite_objective(
     objective: str,
     *,
@@ -208,6 +231,7 @@ def invoke_managed_result(
     variant: str = DEFAULT_HARNESS_VARIANT,
     prompt_key: str = "investigation",
     required_tools: tuple[str, ...] = (),
+    gateway_context_token: str | None = None,
 ) -> Any:
     from .agentcore import (
         AgentCoreHarnessClient,
@@ -220,19 +244,25 @@ def invoke_managed_result(
     if not harness_arn:
         raise SystemExit("NORTHSTAR_HARNESS_ARN is required for a managed Harness invocation")
     config = _load_managed_config(harness_config_path, variant=variant)
-    context = InvocationContext.create(scenario_run_id, session_id=session_id)
+    context = InvocationContext.create(
+        scenario_run_id,
+        session_id=session_id,
+        gateway_context_token=gateway_context_token,
+    )
     if prompt_key == "evaluation":
         rendered_prompt = render_evaluation_prompt(
             objective,
             scenario_run_id=scenario_run_id,
             incident_id=incident_id,
             required_tools=required_tools,
+            gateway_context_token=gateway_context_token,
         )
     else:
         rendered_prompt = render_investigation_prompt(
             objective,
             scenario_run_id=scenario_run_id,
             incident_id=incident_id,
+            gateway_context_token=gateway_context_token,
         )
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
     return AgentCoreHarnessClient(harness_arn, region=region, config=config).invoke(context, rendered_prompt.text)
@@ -277,6 +307,7 @@ def run_cloud_scenario_suite(
             variant=variant,
             prompt_key="evaluation",
             required_tools=tuple(definition.read_only_tools),
+            gateway_context_token=_persisted_gateway_context_token(run_id, context_path),
         )
         gateway_tools = [
             str(item.get("name"))
@@ -351,6 +382,7 @@ def run_direct_scenario_suite(
     from evaluation.runner import evaluate_run
     from simulator.fixtures import DEFAULT_SEED, load_scenarios
     from simulator.persistence import DynamoDBRunRepository
+    from simulator.store import SimulatorStore
 
     if seed != DEFAULT_SEED:
         raise SystemExit(
@@ -369,12 +401,14 @@ def run_direct_scenario_suite(
         artifact_dir.mkdir(parents=True, exist_ok=True)
     scenarios = load_scenarios()
     repository = DynamoDBRunRepository(state_table_name, region=region)
+    runtime_store = SimulatorStore(persistence=repository)
     summaries: list[dict[str, Any]] = []
     for scenario_id in scenario_ids:
         if scenario_id not in scenarios:
             raise SystemExit(f"unknown scenario {scenario_id}; choose from {', '.join(sorted(scenarios))}")
         definition = scenarios[scenario_id]
         run_id = f"cloud-{scenario_id}-{uuid4().hex[:12]}"
+        created_run = runtime_store.create_run(scenario_id, run_id=run_id, seed=seed)
         result = invoke_managed_result(
             harness_config_path=harness_config_path,
             scenario_run_id=run_id,
@@ -384,6 +418,7 @@ def run_direct_scenario_suite(
             variant=variant,
             prompt_key="evaluation",
             required_tools=tuple(definition.read_only_tools),
+            gateway_context_token=created_run.gateway_context_token,
         )
         payload = result.to_dict()
         run = repository.load(run_id)
@@ -472,6 +507,7 @@ def invoke_managed_harness(
         session_id=session_id,
         variant=variant,
         prompt_key="evaluation",
+        gateway_context_token=_persisted_gateway_context_token(scenario_run_id, context_path),
     )
     payload = result.to_dict()
     if artifact_dir:

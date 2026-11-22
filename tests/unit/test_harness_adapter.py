@@ -111,7 +111,8 @@ def test_invocation_adapter_forwards_managed_request_and_correlates_events() -> 
 
     request = fake.calls[0]
     assert request["harnessArn"].endswith("harness/northstar")
-    assert request["runtimeSessionId"] == "s" * 33
+    assert request["runtimeSessionId"].startswith("northstar-v1-")
+    assert len(request["runtimeSessionId"]) >= 33
     assert request["runtimeUserId"] == "demo-user"
     assert request["actorId"] == "demo-actor"
     assert request["messages"][0]["content"][0]["text"] == prompt
@@ -132,6 +133,31 @@ def test_invocation_adapter_forwards_managed_request_and_correlates_events() -> 
 def test_invocation_context_rejects_short_runtime_session_id() -> None:
     with pytest.raises(HarnessInvocationError, match="33 characters"):
         InvocationContext.create("run-1", session_id="too-short")
+
+
+def test_invocation_session_is_bound_to_the_run_and_actor() -> None:
+    context = InvocationContext.create(
+        "run-1",
+        session_id="s" * 33,
+        actor_id="actor-1",
+        tenant_id="tenant-1",
+    )
+
+    resumed = InvocationContext.create(
+        "run-1",
+        session_id=context.session_id,
+        actor_id="actor-1",
+        tenant_id="tenant-1",
+    )
+    assert resumed.session_id == context.session_id
+
+    with pytest.raises(HarnessInvocationError, match="different scenario run"):
+        InvocationContext.create(
+            "run-2",
+            session_id=context.session_id,
+            actor_id="actor-1",
+            tenant_id="tenant-1",
+        )
 
 
 def test_event_stream_runtime_error_is_normalized_without_escaping() -> None:

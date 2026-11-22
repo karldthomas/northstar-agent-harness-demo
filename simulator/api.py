@@ -49,6 +49,8 @@ def _raise_http(exc: Exception) -> None:
         status_code = 403
     elif code == "APPROVAL_EXPIRED":
         status_code = 410
+    elif code == "PERSISTENCE_CONFLICT":
+        status_code = 409
     elif isinstance(exc, OperationError):
         status_code = 409
     else:

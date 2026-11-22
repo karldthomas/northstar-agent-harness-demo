@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
+import inspect
 import re
 from typing import Any, Callable, Iterator, Mapping
 from uuid import uuid4
@@ -31,6 +33,8 @@ class InvocationContext:
     trace_id: str
     user_id: str | None = None
     actor_id: str | None = None
+    tenant_id: str = "demo"
+    gateway_context_token: str | None = None
 
     @classmethod
     def create(
@@ -40,8 +44,29 @@ class InvocationContext:
         session_id: str | None = None,
         user_id: str | None = None,
         actor_id: str | None = None,
+        tenant_id: str = "demo",
+        gateway_context_token: str | None = None,
     ) -> "InvocationContext":
-        resolved_session = session_id or f"{uuid4().hex}-{uuid4().hex}"
+        normalized_tenant = str(tenant_id or "demo").strip() or "demo"
+        normalized_actor = str(actor_id or user_id or "anonymous").strip() or "anonymous"
+        binding = hashlib.sha256(
+            f"{normalized_tenant}:{normalized_actor}:{scenario_run_id}".encode("utf-8")
+        ).hexdigest()[:24]
+        supplied_session = str(session_id or "").strip()
+        if supplied_session and len(supplied_session) < 33:
+            raise HarnessInvocationError("runtimeSessionId must contain at least 33 characters")
+        managed_match = re.fullmatch(r"northstar-v1-([0-9a-f]{24})-([0-9a-f]{32})", supplied_session)
+        if managed_match:
+            if managed_match.group(1) != binding:
+                raise HarnessInvocationError("runtimeSessionId is bound to a different scenario run or actor")
+            resolved_session = supplied_session
+        elif supplied_session:
+            # Preserve caller continuity while deriving an AgentCore session
+            # that cannot be reused across runs or tenants.
+            suffix = hashlib.sha256(supplied_session.encode("utf-8")).hexdigest()[:32]
+            resolved_session = f"northstar-v1-{binding}-{suffix}"
+        else:
+            resolved_session = f"northstar-v1-{binding}-{uuid4().hex}"
         if len(resolved_session) < 33:
             raise HarnessInvocationError("runtimeSessionId must contain at least 33 characters")
         return cls(
@@ -51,6 +76,8 @@ class InvocationContext:
             trace_id=uuid4().hex,
             user_id=user_id,
             actor_id=actor_id,
+            tenant_id=normalized_tenant,
+            gateway_context_token=gateway_context_token,
         )
 
 
@@ -219,6 +246,7 @@ def render_investigation_prompt(
     *,
     scenario_run_id: str,
     incident_id: str | None = None,
+    gateway_context_token: str | None = None,
 ) -> RenderedPrompt:
     """Render the managed investigation prompt for one isolated simulator run."""
 
@@ -228,6 +256,7 @@ def render_investigation_prompt(
             "objective": objective,
             "scenario_run_id": scenario_run_id,
             "incident_id": incident_id,
+            "gateway_context_token": gateway_context_token or "",
         },
     )
 
@@ -237,6 +266,7 @@ def build_investigation_prompt(
     *,
     scenario_run_id: str,
     incident_id: str | None = None,
+    gateway_context_token: str | None = None,
 ) -> str:
     """Compatibility wrapper returning the rendered managed prompt text."""
 
@@ -244,6 +274,7 @@ def build_investigation_prompt(
         objective,
         scenario_run_id=scenario_run_id,
         incident_id=incident_id,
+        gateway_context_token=gateway_context_token,
     ).text
 
 
@@ -254,6 +285,7 @@ def render_approval_resumption_prompt(
     approval_id: str,
     operation_id: str,
     action: str,
+    gateway_context_token: str | None = None,
 ) -> RenderedPrompt:
     """Render the managed read-only resumption prompt after an API-owned mutation."""
 
@@ -265,6 +297,7 @@ def render_approval_resumption_prompt(
             "approval_id": approval_id,
             "operation_id": operation_id,
             "action": action,
+            "gateway_context_token": gateway_context_token or "",
         },
     )
 
@@ -276,6 +309,7 @@ def build_approval_resumption_prompt(
     approval_id: str,
     operation_id: str,
     action: str,
+    gateway_context_token: str | None = None,
 ) -> str:
     """Compatibility wrapper returning the rendered managed prompt text."""
 
@@ -285,6 +319,7 @@ def build_approval_resumption_prompt(
         approval_id=approval_id,
         operation_id=operation_id,
         action=action,
+        gateway_context_token=gateway_context_token,
     ).text
 
 
@@ -294,6 +329,7 @@ def render_evaluation_prompt(
     scenario_run_id: str,
     incident_id: str | None = None,
     required_tools: tuple[str, ...] = (),
+    gateway_context_token: str | None = None,
 ) -> RenderedPrompt:
     """Render the managed bounded read-only evaluation prompt."""
 
@@ -305,6 +341,7 @@ def render_evaluation_prompt(
             "incident_id": incident_id,
             "required_tools": list(required_tools),
             "required_tools_text": ", ".join(required_tools),
+            "gateway_context_token": gateway_context_token or "",
         },
     )
 

@@ -40,6 +40,7 @@ Resources:
                 - Name: objective
                 - Name: scenario_run_id
                 - Name: incident_id
+                - Name: gateway_context_token
                 - Name: input
               Messages:
                 - Role: user
@@ -50,8 +51,9 @@ Resources:
                         Investigate this Northstar synthetic operations situation.
                         Scenario run ID: {{scenario_run_id}}
                         Incident ID: {{incident_id}}
+                        Gateway context token: {{gateway_context_token}}
 
-                        Use only the explicitly allowed read-only simulator tools. The scenario run ID in the runtime context is authoritative and must be included in every simulator tool call. Use read-only evidence first, cite the observations you relied on, and report unresolved or conflicting evidence instead of guessing.
+                        Use only the explicitly allowed read-only simulator tools. The scenario run ID and Gateway context token in the runtime context are authoritative and must be included in every simulator tool call. Use read-only evidence first, cite the observations you relied on, and report unresolved or conflicting evidence instead of guessing.
 
                         After the investigation, always finish with a clearly labeled Recommendation section containing exactly these business-facing fields:
                         - Proposed change: the specific change you recommend, or None if the evidence does not support a safe change
@@ -98,6 +100,7 @@ Resources:
                 - Name: approval_id
                 - Name: operation_id
                 - Name: action
+                - Name: gateway_context_token
                 - Name: input
               Messages:
                 - Role: user
@@ -110,8 +113,9 @@ Resources:
                         Approval ID: {{approval_id}}
                         Operation ID: {{operation_id}}
                         Action: {{action}}
+                        Gateway context token: {{gateway_context_token}}
 
-                        The application has already enforced Cognito authorization, exact scope, idempotency, and post-action verification. Do not execute or propose a mutation. Use only the explicitly allowed read-only simulator tools to reread authoritative state, identify partial or unresolved targets, and report whether the operation is verified.
+                        The application has already enforced Cognito authorization, exact scope, idempotency, and post-action verification. Do not execute or propose a mutation. Use only the explicitly allowed read-only simulator tools to reread authoritative state, identify partial or unresolved targets, and report whether the operation is verified. Include the scenario run ID and Gateway context token in every tool call.
 
                         Runtime resumption context:
                         {{input}}
@@ -149,6 +153,7 @@ Resources:
                 - Name: required_tools_text
                 - Name: scenario_run_id
                 - Name: incident_id
+                - Name: gateway_context_token
                 - Name: input
               Messages:
                 - Role: user
@@ -156,7 +161,7 @@ Resources:
                     - Text: |
                         {{objective}}
 
-                        This is a read-only evaluation run for the synthetic Northstar enterprise. Do not attempt remediation, approval, access grants, restarts, configuration changes, or any other write. Use each of these required read-only simulator tools at least once in a sensible order. Required tool names: {{required_tools_text}}. Scenario run ID: {{scenario_run_id}}. Include the scenario run ID in every call, then stop and give a concise evidence-based summary under 200 words.
+                        This is a read-only evaluation run for the synthetic Northstar enterprise. Do not attempt remediation, approval, access grants, restarts, configuration changes, or any other write. Use each of these required read-only simulator tools at least once in a sensible order. Required tool names: {{required_tools_text}}. Scenario run ID: {{scenario_run_id}}. Gateway context token: {{gateway_context_token}}. Include both the scenario run ID and Gateway context token in every call, then stop and give a concise evidence-based summary under 200 words.
 
                         Runtime evaluation context:
                         {{input}}
