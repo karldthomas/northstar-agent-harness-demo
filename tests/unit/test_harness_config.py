@@ -105,3 +105,10 @@ def test_gateway_openapi_contract_has_only_read_only_named_operations() -> None:
         for method in path_item
         if method.lower() in {"get", "post", "put", "patch", "delete"}
     )
+    service_schema = next(
+        parameter["schema"]
+        for parameter in document["paths"]["/simulator/runs/{run_id}/tools/check-service-health"]["get"]["parameters"]
+        if parameter.get("name") == "service_id"
+    )
+    assert "all" not in service_schema["enum"]
+    assert "svc-vpn-gateway" in service_schema["enum"]

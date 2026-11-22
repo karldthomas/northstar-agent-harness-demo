@@ -46,6 +46,32 @@ class FakeDynamoTable:
         return {"Items": list(self.items.values())}
 
 
+class ConflictOnceDynamoTable(FakeDynamoTable):
+    def __init__(self) -> None:
+        super().__init__()
+        self.conflict_once = False
+
+    def put_item(
+        self,
+        *,
+        Item: dict[str, object],
+        ConditionExpression: str | None = None,
+        ExpressionAttributeNames: dict[str, str] | None = None,
+        ExpressionAttributeValues: dict[str, object] | None = None,
+    ) -> None:
+        if self.conflict_once:
+            self.conflict_once = False
+            error = RuntimeError("conditional check failed")
+            error.response = {"Error": {"Code": "ConditionalCheckFailedException"}}
+            raise error
+        super().put_item(
+            Item=Item,
+            ConditionExpression=ConditionExpression,
+            ExpressionAttributeNames=ExpressionAttributeNames,
+            ExpressionAttributeValues=ExpressionAttributeValues,
+        )
+
+
 def test_seeded_fixture_is_connected_and_reproducible() -> None:
     first = build_environment("vpn-deployment-failure", scenario_run_id="run-a")
     second = build_environment("vpn-deployment-failure", scenario_run_id="run-b")
@@ -76,6 +102,11 @@ def test_scenario_catalog_has_the_original_scenarios_and_phase_five_variants() -
     assert len(scenarios) == 20
     assert all(definition.read_only_tools for definition in scenarios.values())
     assert all(definition.description.strip() for definition in scenarios.values())
+    assert scenarios["vpn-deployment-failure"].primary_incident_id == "INC-0001"
+    assert scenarios["partial-remediation-failure"].primary_incident_id == "INC-0002"
+    assert scenarios["service-outage"].primary_incident_id == "INC-0003"
+    assert scenarios["unauthorized-access-request"].primary_incident_id == "INC-0004"
+    assert scenarios["interrupted-investigation"].primary_incident_id == "INC-0005"
 
 
 def test_read_only_tools_return_typed_observations_without_advancing_state() -> None:
@@ -120,6 +151,22 @@ def test_dynamodb_run_repository_shares_state_and_harness_events_between_store_i
     assert page["events"][0]["payload"]["turn_index"] == 1
     assert page["events"][1]["payload"]["tool_name"] == "check_service_health"
     assert api_store.get_run("run-persisted").owner_actor_id == "actor-1"
+
+
+def test_read_only_observation_retries_after_dynamodb_conflict() -> None:
+    table = ConflictOnceDynamoTable()
+    repository = DynamoDBRunRepository("northstar-test-scenario-state", table=table)
+    store = SimulatorStore(persistence=repository)
+    store.create_run("vpn-deployment-failure", run_id="run-observation-retry")
+    table.conflict_once = True
+
+    result = ReadOnlyToolset(store).check_service_health("run-observation-retry")
+
+    assert result.status == "succeeded"
+    persisted = repository.load("run-observation-retry")
+    assert persisted is not None
+    assert len(persisted.observations) == 1
+    assert [event["event_type"] for event in persisted.events][-1] == "observation_recorded"
 
 
 def test_dynamodb_repository_rejects_stale_whole_snapshot_writes() -> None:

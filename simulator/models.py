@@ -131,3 +131,4 @@ class ScenarioDefinition:
     read_only_tools: tuple[str, ...]
     restricted_actions: tuple[str, ...]
     fixture_profile: str | None = None
+    primary_incident_id: str | None = None

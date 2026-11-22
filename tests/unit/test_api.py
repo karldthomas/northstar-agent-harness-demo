@@ -81,6 +81,10 @@ def test_harness_api_streams_correlated_events_without_owning_orchestration(
         def stream(self, context, prompt):
             assert context.scenario_run_id == "demo-vpn"
             assert "Scenario run ID: demo-vpn" in prompt
+            assert "Incident ID: INC-0001" in prompt
+            assert '"primary_incident_id": "INC-0001"' in prompt
+            assert '"service_id": "svc-vpn-gateway"' in prompt
+            assert '"related_deployment_id": "DEP-0001"' in prompt
             yield HarnessEvent(
                 event_type="contentBlockDelta",
                 sequence=1,

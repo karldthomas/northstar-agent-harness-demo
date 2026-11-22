@@ -14,7 +14,7 @@
           "parameters": [
             {"$ref": "#/components/parameters/RunId"},
             {"$ref": "#/components/parameters/GatewayContextToken"},
-            {"name": "service_id", "in": "query", "required": false, "schema": {"type": "string", "default": "svc-vpn-gateway"}}
+            {"name": "service_id", "in": "query", "required": false, "description": "One concrete service ID. Do not use all or an aggregate label.", "schema": {"type": "string", "enum": ["svc-vpn-gateway", "svc-payments", "svc-identity", "svc-database", "svc-device-management", "svc-support"], "default": "svc-vpn-gateway"}}
         ],
         "responses": {"200": {"$ref": "#/components/responses/ToolObservation"}}
       }

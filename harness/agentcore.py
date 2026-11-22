@@ -247,6 +247,7 @@ def render_investigation_prompt(
     scenario_run_id: str,
     incident_id: str | None = None,
     gateway_context_token: str | None = None,
+    runtime_context: Mapping[str, Any] | None = None,
 ) -> RenderedPrompt:
     """Render the managed investigation prompt for one isolated simulator run."""
 
@@ -257,6 +258,7 @@ def render_investigation_prompt(
             "scenario_run_id": scenario_run_id,
             "incident_id": incident_id,
             "gateway_context_token": gateway_context_token or "",
+            "runtime_context": dict(runtime_context or {}),
         },
     )
 
@@ -267,6 +269,7 @@ def build_investigation_prompt(
     scenario_run_id: str,
     incident_id: str | None = None,
     gateway_context_token: str | None = None,
+    runtime_context: Mapping[str, Any] | None = None,
 ) -> str:
     """Compatibility wrapper returning the rendered managed prompt text."""
 
@@ -275,6 +278,7 @@ def build_investigation_prompt(
         scenario_run_id=scenario_run_id,
         incident_id=incident_id,
         gateway_context_token=gateway_context_token,
+        runtime_context=runtime_context,
     ).text
 
 

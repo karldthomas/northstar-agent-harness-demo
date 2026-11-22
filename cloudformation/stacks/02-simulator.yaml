@@ -202,6 +202,12 @@ Resources:
       Handler: apps.api.hook_handler.handler
       Policies:
         - AWSLambdaBasicExecutionRole
+        - Statement:
+            - Sid: ReadScenarioStateForHarnessHook
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/northstar-${EnvironmentName}-scenario-state
 
   HarnessHookInvokePermission:
     Type: AWS::Lambda::Permission

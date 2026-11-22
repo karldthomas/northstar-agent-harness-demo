@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
   API_BASE,
   type Approval,
@@ -62,6 +62,197 @@ function RecommendationSummary({ recommendation }: { recommendation: HarnessReco
     <div className="recommendation-field"><span>Approval required</span><strong>{recommendation.approval_required}</strong></div>
     <div className="recommendation-field"><span>Execution status</span><strong>{recommendation.execution_status}</strong></div>
     <div className="recommendation-field recommendation-evidence"><span>Evidence</span><strong>{recommendation.evidence}</strong></div>
+  </div>;
+}
+
+function inlineReportMarkdown(value: string): ReactNode {
+  return value.split(/(\*\*.+?\*\*|`[^`]+`)/g).filter(Boolean).map((part, index) => {
+    if (part.startsWith("**") && part.endsWith("**")) return <strong key={`bold-${index}`}>{part.slice(2, -2)}</strong>;
+    if (part.startsWith("`") && part.endsWith("`")) return <code key={`code-${index}`}>{part.slice(1, -1)}</code>;
+    return <span key={`text-${index}`}>{part}</span>;
+  });
+}
+
+function AgentReport({ report }: { report: string }) {
+  const blocks: ReactNode[] = [];
+  let paragraph: string[] = [];
+  let list: { ordered: boolean; items: string[] } | null = null;
+  let blockIndex = 0;
+
+  function flushParagraph() {
+    if (!paragraph.length) return;
+    blocks.push(<p key={`paragraph-${blockIndex++}`}>{inlineReportMarkdown(paragraph.join(" "))}</p>);
+    paragraph = [];
+  }
+
+  function flushList() {
+    if (!list) return;
+    const List = list.ordered ? "ol" : "ul";
+    blocks.push(<List key={`list-${blockIndex++}`}>{list.items.map((item, index) => <li key={`${index}-${item}`}>{inlineReportMarkdown(item)}</li>)}</List>);
+    list = null;
+  }
+
+  function flush() {
+    flushParagraph();
+    flushList();
+  }
+
+  for (const rawLine of report.replace(/\r/g, "").split("\n")) {
+    const line = rawLine.trim();
+    if (!line) { flush(); continue; }
+
+    const markdownHeading = line.match(/^(#{1,6})\s+(.+)$/);
+    const emphasisHeading = line.match(/^\*\*(.+?)\*\*$/);
+    if (markdownHeading || emphasisHeading) {
+      flush();
+      const headingText = markdownHeading?.[2] || emphasisHeading?.[1] || line;
+      const Heading = markdownHeading && markdownHeading[1].length > 3 ? "h4" : "h3";
+      blocks.push(<Heading className="report-heading" key={`heading-${blockIndex++}`}>{inlineReportMarkdown(headingText)}</Heading>);
+      continue;
+    }
+
+    const listItem = line.match(/^(?:([-*])|(\d+\.))\s+(.+)$/);
+    if (listItem) {
+      flushParagraph();
+      const ordered = Boolean(listItem[2]);
+      if (list && list.ordered !== ordered) flushList();
+      list ||= { ordered, items: [] };
+      list.items.push(listItem[3]);
+      continue;
+    }
+
+    flushList();
+    paragraph.push(line);
+  }
+  flush();
+
+  return <div className="report-content">{blocks}</div>;
+}
+
+type InvestigationProgressState = "idle" | "running" | "waiting" | "complete" | "failed";
+type InvestigationStepState = "pending" | "active" | "complete" | "failed";
+type InvestigationProgress = {
+  state: InvestigationProgressState;
+  title: string;
+  detail: string;
+  currentIndex: number;
+  completedCount: number;
+  steps: Array<{ label: string; detail: string; state: InvestigationStepState }>;
+  latest: { title: string; detail: string; occurredAt: string } | null;
+};
+
+const INVESTIGATION_STEPS = [
+  { label: "Run created", detail: "Authoritative scenario baseline loaded." },
+  { label: "Agent planning", detail: "The agent is deciding which checks to run." },
+  { label: "Collecting evidence", detail: "Reading current incidents, services, devices, and tool results." },
+  { label: "Building recommendation", detail: "Turning the evidence into a safe, scoped next step." },
+  { label: "Ready for review", detail: "Recommendation and supporting evidence are available." },
+] as const;
+
+function displayToolName(value: unknown): string {
+  const tool = String(value || "system check").replace(/^.*___/, "").replaceAll("_", " ").trim();
+  return tool ? tool.replace(/\b\w/g, (character) => character.toUpperCase()) : "System check";
+}
+
+function progressActivity(event: EventRecord): { title: string; detail: string; occurredAt: string } {
+  const payload = event.payload || {};
+  const tool = displayToolName(payload.tool_name);
+  switch (event.event_type) {
+    case "scenario_created":
+      return { title: "Run created", detail: "The authoritative scenario baseline is ready.", occurredAt: event.occurred_at };
+    case "scenario_reset":
+      return { title: "Baseline reset", detail: "The authoritative scenario is ready to investigate again.", occurredAt: event.occurred_at };
+    case "agent_invocation_started":
+      return { title: "Investigation started", detail: "The agent is planning the evidence checks.", occurredAt: event.occurred_at };
+    case "agent_turn_started":
+      return { title: `Reasoning pass ${String(payload.turn_index || "")}`.trim(), detail: "The agent is deciding what to inspect next.", occurredAt: event.occurred_at };
+    case "agent_tool_call_requested":
+      return { title: `Checking ${tool}`, detail: "Waiting for the authoritative system response.", occurredAt: event.occurred_at };
+    case "observation_recorded":
+      return { title: `Evidence received · ${tool}`, detail: payload.status === "failed" ? "The check returned a failure that needs review." : "The authoritative result was recorded for this run.", occurredAt: event.occurred_at };
+    case "agent_turn_completed":
+      return { title: "Reasoning pass complete", detail: "The agent is evaluating the evidence it collected.", occurredAt: event.occurred_at };
+    case "agent_invocation_completed":
+      return { title: "Recommendation drafted", detail: `${String(payload.tool_call_count || 0)} system check(s) · ${String(payload.turn_count || 0)} reasoning pass(es).`, occurredAt: event.occurred_at };
+    case "agent_error":
+      return { title: "Investigation needs attention", detail: `${String(payload.error_code || "Agent error")}: ${String(payload.message || "The agent could not complete this step.")}`, occurredAt: event.occurred_at };
+    default:
+      return { title: event.event_type.replaceAll("_", " "), detail: eventDetail(event), occurredAt: event.occurred_at };
+  }
+}
+
+function getInvestigationProgress(
+  runId: string | null,
+  events: EventRecord[],
+  harness: HarnessResult | null,
+  busy: string,
+  approvals: Approval[],
+): InvestigationProgress {
+  const latest = events.length ? progressActivity(events[events.length - 1]) : null;
+  if (!runId) {
+    return {
+      state: "idle",
+      title: "No investigation selected",
+      detail: "Create a run to watch the investigation progress.",
+      currentIndex: 0,
+      completedCount: 0,
+      steps: INVESTIGATION_STEPS.map((step) => ({ ...step, state: "pending" })),
+      latest: null,
+    };
+  }
+
+  const latestReset = events.reduce((lastIndex, event, index) => event.event_type === "scenario_reset" ? index : lastIndex, -1);
+  const currentEpochEvents = latestReset >= 0 ? events.slice(latestReset) : events;
+  const latestInvocationStart = currentEpochEvents.reduce((lastIndex, event, index) => event.event_type === "agent_invocation_started" ? index : lastIndex, -1);
+  const activeEvents = latestInvocationStart >= 0 ? currentEpochEvents.slice(latestInvocationStart) : currentEpochEvents;
+  const failed = harness?.status === "failed" || harness?.status === "resume_failed" || harness?.succeeded === false || activeEvents.some((event) => event.event_type === "agent_error");
+  const complete = harness?.succeeded === true;
+  const awaitingApproval = complete && approvals.some((approval) => approval.status === "requested");
+  const hasEvidence = activeEvents.some((event) => event.event_type === "agent_tool_call_requested" || event.event_type === "observation_recorded");
+  const hasPlanning = activeEvents.some((event) => event.event_type === "agent_invocation_started" || event.event_type === "agent_turn_started");
+  const hasRecommendationWork = activeEvents.some((event) => event.event_type === "agent_turn_completed" || event.event_type === "agent_invocation_completed");
+  const currentIndex = complete ? INVESTIGATION_STEPS.length - 1 : hasRecommendationWork ? 3 : hasEvidence ? 2 : hasPlanning || busy === "investigation" || busy === "resume" ? 1 : 0;
+  const state: InvestigationProgressState = failed ? "failed" : awaitingApproval ? "waiting" : complete ? "complete" : "running";
+  const completedCount = complete ? INVESTIGATION_STEPS.length : currentIndex;
+  const title = failed
+    ? "Investigation needs attention"
+    : awaitingApproval
+      ? "Awaiting human approval"
+      : complete
+        ? "Investigation complete"
+        : INVESTIGATION_STEPS[currentIndex].label;
+  const detail = failed
+    ? "Review the latest activity and event timeline for the failed step."
+    : awaitingApproval
+      ? "The agent has made its recommendation; no change runs until it is approved."
+      : complete
+        ? "The recommendation and evidence are ready to review below."
+        : INVESTIGATION_STEPS[currentIndex].detail;
+  const steps = INVESTIGATION_STEPS.map((step, index) => ({
+    ...step,
+    state: failed && index === currentIndex ? "failed" as InvestigationStepState : complete || index < currentIndex ? "complete" as InvestigationStepState : index === currentIndex ? "active" as InvestigationStepState : "pending" as InvestigationStepState,
+  }));
+  if (awaitingApproval) steps[steps.length - 1].state = "active";
+  return { state, title, detail, currentIndex, completedCount, steps, latest };
+}
+
+function InvestigationProgressCard({ progress }: { progress: InvestigationProgress }) {
+  const progressPercent = progress.completedCount === INVESTIGATION_STEPS.length
+    ? 100
+    : Math.max(8, ((progress.completedCount + (progress.state === "running" ? 0.5 : 0)) / INVESTIGATION_STEPS.length) * 100);
+  return <div className={`investigation-progress ${progress.state}`} aria-live="polite">
+    <div className="progress-heading">
+      <div><p className="eyebrow">LIVE PROGRESS</p><strong>{progress.title}</strong><p className="progress-detail">{progress.detail}</p></div>
+      <span className="progress-count">{progress.completedCount}/{INVESTIGATION_STEPS.length} steps</span>
+    </div>
+    <div className="progress-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progressPercent)} aria-label="Investigation progress"><span style={{ width: `${progressPercent}%` }} /></div>
+    <ol className="progress-steps">
+      {progress.steps.map((step, index) => <li className={`progress-step ${step.state}`} key={step.label}>
+        <span className="progress-dot">{step.state === "complete" ? "✓" : step.state === "failed" ? "!" : index + 1}</span>
+        <span className="progress-step-copy"><strong>{step.label}</strong><small>{step.detail}</small></span>
+      </li>)}
+    </ol>
+    {progress.latest && <div className="latest-activity"><span className="activity-pulse" /><div><span>Latest activity</span><strong>{progress.latest.title}</strong><small>{progress.latest.detail}</small></div><time dateTime={progress.latest.occurredAt}>{new Date(progress.latest.occurredAt).toLocaleTimeString()}</time></div>}
   </div>;
 }
 
@@ -316,7 +507,10 @@ function Dashboard({ session, principal, onSignOut }: { session: Session; princi
         targetIds: rollbackTargets,
         payload: { deployment_id: "DEP-0001" },
         scope: `DEP-0001 / INC-0001 / all ${rollbackTargets.length} affected device(s)`,
-        scopeTokens: ["dep-0001", "inc-0001", String(rollbackTargets.length)],
+        // The executable plan owns the exact deployment, incident, and target
+        // IDs. The agent-facing scope may use business language instead, so
+        // match the immutable service and affected-device count it describes.
+        scopeTokens: ["svc-vpn-gateway", String(rollbackTargets.length)],
         idempotencyPrefix: "restore-connectivity",
       };
     }
@@ -332,11 +526,33 @@ function Dashboard({ session, principal, onSignOut }: { session: Session; princi
     return harness?.recommendation || parseRecommendation(agentReport);
   }, [agentReport, harness?.recommendation]);
   const approvalMatchesRecommendation = recommendationMatchesChange(changePlan, agentRecommendation);
+  const investigationProgress = useMemo(() => getInvestigationProgress(runId, events, harness, busy, approvals), [approvals, busy, events, harness, runId]);
 
-  async function createRun(event: FormEvent) {
-    event.preventDefault(); if (!scenarioId) return; setBusy("create"); setNotice("");
-    try { const result = await request<Snapshot>("/simulator/runs", { method: "POST", body: JSON.stringify({ scenario_id: scenarioId }) }, session); setRunId(result.run_id); setHarness(null); setHarnessSessionId(null); setEvaluation(null); cursorRef.current = 0; setCursor(0); setEvents([]); await loadRun(result.run_id); }
-    catch (error) { setNotice(errorMessage(error)); } finally { setBusy(""); }
+  async function startInvestigation(event: FormEvent) {
+    event.preventDefault(); if (!scenarioId) return; setBusy("investigation"); setNotice("");
+    const reuseRun = Boolean(runId && snapshot?.scenario_id === scenarioId && !harness);
+    let nextRunId = reuseRun ? runId : null;
+    try {
+      if (!reuseRun) {
+        setRunId(null); setSnapshot(null); setTopology(null); setComparison(null); setApprovals([]); setSelectedEntity(null); setHarness(null); setHarnessSessionId(null); setEvaluation(null); cursorRef.current = 0; setCursor(0); setEvents([]);
+        const created = await request<Snapshot>("/simulator/runs", { method: "POST", body: JSON.stringify({ scenario_id: scenarioId }) }, session);
+        nextRunId = created.run_id;
+        setRunId(nextRunId);
+      } else {
+        setHarnessSessionId(null); setEvaluation(null);
+      }
+      if (!nextRunId) throw new Error("The investigation run could not be created.");
+      setHarness({ status: "invoking" });
+      await loadRun(nextRunId);
+      const result = await request<HarnessResult>("/harness/invocations", { method: "POST", body: JSON.stringify({ scenario_run_id: nextRunId, objective }) }, session);
+      setHarness(result);
+      if (typeof result.session_id === "string") setHarnessSessionId(result.session_id);
+      await loadRun(nextRunId);
+    } catch (error) {
+      const message = errorMessage(error);
+      setHarness((previous) => ({ ...(previous || {}), status: "failed", text: message }));
+      setNotice(message);
+    } finally { setBusy(""); }
   }
 
   async function resetRun() {
@@ -349,12 +565,6 @@ function Dashboard({ session, principal, onSignOut }: { session: Session; princi
     if (!runId) return;
     try { setSelectedEntity({ type, id, data: await request(`/simulator/runs/${runId}/entities/${type}/${id}`, {}, session) }); }
     catch (error) { setNotice(errorMessage(error)); }
-  }
-
-  async function invokeHarness() {
-    if (!runId) return; setBusy("harness"); setHarness({ status: "invoking" });
-    try { const result = await request<HarnessResult>("/harness/invocations", { method: "POST", body: JSON.stringify({ scenario_run_id: runId, objective }) }, session); setHarness(result); if (typeof result.session_id === "string") setHarnessSessionId(result.session_id); await loadRun(runId); }
-    catch (error) { setHarness({ status: "failed", text: errorMessage(error) }); } finally { setBusy(""); }
   }
 
   async function resumeHarnessAfterApproval(approval: Approval) {
@@ -422,7 +632,7 @@ function Dashboard({ session, principal, onSignOut }: { session: Session; princi
   return <div className="app-shell">
     <header className="topbar"><div><p className="eyebrow">NORTHSTAR / SYNTHETIC OPERATIONS</p><h1>Agent operations console</h1><p className="muted">Agent recommendations, current business state, and replayable activity.</p></div><div className="topbar-right"><StatusPill tone="good">{health}</StatusPill><span className="user-chip">{principal.email || principal.username}{principal.is_admin ? " · admin" : ""}</span><button className="secondary" onClick={() => { saveSession(null); onSignOut(); }}>Sign out</button></div></header>
     <main className="content-shell">
-      <section className="panel scenario-panel"><div className="section-heading"><div><p className="eyebrow">SCENARIO CATALOG</p><h2>Choose a business situation</h2></div><span className="muted">{runId ? "Investigation in progress" : "No investigation selected"}</span></div><form className="controls" onSubmit={createRun}><label>Business situation<select value={scenarioId} onChange={(event) => setScenarioId(event.target.value)}>{scenarios.map((scenario) => <option key={scenario.scenario_id} value={scenario.scenario_id}>{scenario.name}</option>)}</select></label><label className="wide-field">Investigation goal<input value={objective} onChange={(event) => setObjective(event.target.value)} /></label><button type="submit" disabled={!scenarioId || Boolean(busy)}>{busy === "create" ? "Creating…" : "Create investigation"}</button><button type="button" className="secondary" disabled={!runId || Boolean(busy)} onClick={resetRun}>{busy === "reset" ? "Resetting…" : "Reset"}</button></form>{selectedScenario && <div className="scenario-description" aria-live="polite"><div><p className="eyebrow">WHAT THIS SITUATION SIMULATES</p><h3>{selectedScenario.name}</h3></div><p>{selectedScenario.description}</p><small><strong>Investigation goal:</strong> {selectedScenario.objective}</small></div>}{notice && <p className="error-text">{notice}</p>}</section>
+      <section className="panel scenario-panel"><div className="section-heading"><div><p className="eyebrow">SCENARIO CATALOG</p><h2>Choose a business situation</h2></div><div className={`scenario-progress-status ${investigationProgress.state}`} aria-live="polite"><span className="scenario-progress-dot" /><strong>{investigationProgress.title}</strong>{runId && <small>{investigationProgress.completedCount}/{INVESTIGATION_STEPS.length} steps</small>}</div></div><form className="controls" onSubmit={startInvestigation}><label>Business situation<select value={scenarioId} onChange={(event) => setScenarioId(event.target.value)}>{scenarios.map((scenario) => <option key={scenario.scenario_id} value={scenario.scenario_id}>{scenario.name}</option>)}</select></label><label className="wide-field">Investigation goal<input value={objective} onChange={(event) => setObjective(event.target.value)} /></label><button type="submit" disabled={!scenarioId || Boolean(busy)}>{busy === "investigation" ? "Starting…" : "Start investigation"}</button><button type="button" className="secondary" disabled={!runId || Boolean(busy)} onClick={resetRun}>{busy === "reset" ? "Resetting…" : "Reset"}</button></form><p className="workflow-note"><strong>Start investigation</strong> prepares the digital twin, collects evidence, and produces the agent recommendation.</p>{selectedScenario && <div className="scenario-description" aria-live="polite"><div><p className="eyebrow">WHAT THIS SITUATION SIMULATES</p><h3>{selectedScenario.name}</h3></div><p>{selectedScenario.description}</p><small><strong>Investigation goal:</strong> {selectedScenario.objective}</small></div>}{notice && <p className="error-text">{notice}</p>}</section>
 
       {principal.is_admin && <section className="panel admin-panel"><div><p className="eyebrow">ADMIN ONLY</p><h2>Invite a Cognito user</h2><p className="muted">The backend checks the <code>northstar-admin</code> group. User-pool self sign-up is disabled.</p></div><form className="admin-form" onSubmit={createUser}><label htmlFor="admin-email">Operator email</label><input id="admin-email" type="email" placeholder="operator@example.com" value={newUserEmail} onChange={(event) => setNewUserEmail(event.target.value)} required /><button type="submit">Invite user</button></form>{adminNotice && <p className={adminNotice.startsWith("INVITED") ? "success-text" : "error-text"} role="status">{adminNotice}</p>}</section>}
 
@@ -431,7 +641,7 @@ function Dashboard({ session, principal, onSignOut }: { session: Session; princi
       <section className="panel approval-panel">
         <div className="section-heading"><div><p className="eyebrow">HUMAN APPROVAL</p><h2>What change does the agent recommend?</h2></div><StatusPill tone={approvals.some((approval) => approval.status === "requested") ? "warn" : "neutral"}>{approvals.length ? `${approvals.length} request(s)` : "No requests"}</StatusPill></div>
         <p className="muted">The operations agent investigates first. This panel shows the proposed change, scope, evidence, and approval decision. Nothing is submitted or executed until the recommendation is explicit.</p>
-        {agentRecommendation ? <div className="agent-recommendation"><p className="eyebrow">AGENT RECOMMENDATION</p><RecommendationSummary recommendation={agentRecommendation} />{agentReport && <details className="report-details"><summary>Show full agent report</summary><pre className="recommendation-box">{agentReport}</pre></details>}</div> : <p className="empty-state">Start the investigation below. The agent’s proposed change will appear here before any approval request can be created.</p>}
+        {agentRecommendation ? <div className="agent-recommendation"><p className="eyebrow">AGENT RECOMMENDATION</p><RecommendationSummary recommendation={agentRecommendation} />{agentReport && <details className="report-details"><summary>Show full agent report</summary><AgentReport report={agentReport} /></details>}</div> : <p className="empty-state">Start the investigation below. The agent’s proposed change will appear here before any approval request can be created.</p>}
         {changePlan && agentRecommendation && approvalMatchesRecommendation && agentRecommendation.approval_required_yes ? <div className="approval-toolbar"><span className="target-summary"><strong>Change ready to request approval</strong><small>Agent proposed: {agentRecommendation.proposed_change}</small><small>Agent scope: {agentRecommendation.scope}</small><small>Application targets: {changePlan.label} · {changePlan.scope}</small><small>Approval required: {agentRecommendation.approval_required}</small></span><button disabled={!runId || Boolean(busy)} onClick={proposeChange}>{busy === "proposal" ? "Requesting…" : "Submit for approval"}</button></div> : changePlan && agentRecommendation && agentRecommendation.actionable && !agentRecommendation.approval_required_yes ? <p className="empty-state">The agent proposed “{agentRecommendation.proposed_change}”, but did not say that approval is required. No approval request was created.</p> : changePlan && agentRecommendation && agentRecommendation.actionable ? <p className="error-text">The agent proposed “{agentRecommendation.proposed_change}”, but it does not match an executable action allowed for this situation. No approval request was created.</p> : changePlan && agentRecommendation ? <p className="empty-state">No state-changing change is recommended for approval. The agent’s evidence does not support a safe action yet.</p> : changePlan ? <p className="empty-state">After the investigation completes, the agent’s recommendation and exact scope will appear here for approval.</p> : agentRecommendation && agentRecommendation.actionable ? <p className="error-text">The agent proposed a change, but this situation has no executable approval action in the console.</p> : agentReport ? <p className="empty-state">No state-changing change is recommended for approval.</p> : <p className="empty-state">No recommendation is available yet.</p>}
         {approvals.length ? <div className="approval-list">{approvals.slice().reverse().map((approval) => <div className="approval-row" key={approval.approval_id}><div><strong>{approvalActionLabel(approval.action)}</strong><small>Scope: {approval.target_ids.length} target(s) · {approval.target_ids.join(", ")}</small><small>Requested by {approval.requested_by} · expires {new Date(approval.expires_at).toLocaleString()}</small></div><div className="approval-actions"><StatusPill tone={approvalTone(approval.status)}>{approval.status}</StatusPill>{principal.is_admin && approval.status === "requested" && <><button className="secondary" disabled={Boolean(busy)} onClick={() => decideApproval(approval.approval_id, "rejected")}>Reject</button><button disabled={Boolean(busy)} onClick={() => decideApproval(approval.approval_id, "approved")}>Approve</button></>}{(approval.status === "approved" || approval.status === "executed") && <button disabled={Boolean(busy)} onClick={() => executeApproval(approval.approval_id)}>{approval.status === "executed" ? "Retry & verify" : "Execute & verify"}</button>}</div></div>)}</div> : agentRecommendation && changePlan && approvalMatchesRecommendation ? <p className="empty-state">No approval request yet.</p> : null}
       </section>
@@ -439,7 +649,7 @@ function Dashboard({ session, principal, onSignOut }: { session: Session; princi
       <section className="dashboard-grid"><article className="panel summary-panel"><div className="section-heading"><div><p className="eyebrow">AUTHORITATIVE SNAPSHOT</p><h2>Environment</h2></div><StatusPill tone={snapshot ? "good" : "neutral"}>{snapshot ? `revision ${snapshot.summary.revision}` : "Create a run"}</StatusPill></div>{snapshot ? <><div className="count-grid"><CountCard label="Devices" value={snapshot.summary.entity_counts.devices || 0} detail={formatCounts(snapshot.summary.device_status_counts)} /><CountCard label="Connectivity" value={snapshot.summary.entity_counts.devices || 0} detail={formatCounts(snapshot.summary.vpn_status_counts)} /><CountCard label="Services" value={snapshot.summary.entity_counts.services || 0} detail={formatCounts(snapshot.summary.service_status_counts)} /><CountCard label="Incidents" value={snapshot.summary.entity_counts.incidents || 0} detail={formatCounts(snapshot.summary.incident_status_counts)} /></div><div className="comparison"><strong>Before / after</strong><span>{changedCount ? `${changedCount} entity changes · revision ${comparison?.before.revision} → ${comparison?.after.revision}` : "No authoritative state changes yet."}</span></div><h3>Open incidents</h3><div className="entity-list">{openIncidents.length ? openIncidents.map((incident) => <button className="entity-row" key={incident.incident_id} onClick={() => openEntity("incident", incident.incident_id)}><span><strong>{incident.incident_id}</strong> {incident.title}</span><StatusPill tone="warn">{incident.severity}</StatusPill></button>) : <p className="muted">No open incidents.</p>}</div></> : <p className="empty-state">Create a run to load the digital twin.</p>}</article>
         <article className="panel topology-panel"><div className="section-heading"><div><p className="eyebrow">SERVICE GRAPH</p><h2>Dependencies</h2></div></div>{topology ? <div className="service-list">{topology.services.map((service) => <div className="service-node" key={service.service_id}><div><strong>{service.name}</strong><span className="muted">{service.service_id}</span></div><StatusPill tone={service.status === "operational" ? "good" : "bad"}>{service.status}</StatusPill>{service.dependency_ids.length > 0 && <small>depends on {service.dependency_ids.join(", ")}</small>}</div>)}</div> : <p className="empty-state">Create a run to load service topology.</p>}</article></section>
 
-      <section className="dashboard-grid lower-grid"><article className="panel device-panel"><div className="section-heading"><div><p className="eyebrow">FLEET VIEW</p><h2>Devices</h2></div><span className="muted">{devices.length ? `${snapshot?.summary.entity_counts.devices} total · showing ${devices.length}` : ""}</span></div>{devices.length ? <div className="table-wrap"><table><caption className="sr-only">Synthetic device fleet</caption><thead><tr><th>Device</th><th>Office</th><th>Health</th><th>Connectivity</th></tr></thead><tbody>{devices.map((device) => <tr key={device.device_id} onClick={() => openEntity("device", device.device_id)}><td><button className="link-button" onClick={(event) => { event.stopPropagation(); openEntity("device", device.device_id); }}>{device.device_id}</button><small>{device.hostname}</small></td><td>{device.office}</td><td><StatusPill tone={device.status === "healthy" ? "good" : "warn"}>{device.status}</StatusPill></td><td><StatusPill tone={device.vpn_status === "connected" ? "good" : "bad"}>{device.vpn_status}</StatusPill></td></tr>)}</tbody></table></div> : <p className="empty-state">No run devices to display.</p>}</article><article className="panel agent-panel"><div className="section-heading"><div><p className="eyebrow">AGENT INVESTIGATION</p><h2>Investigation activity</h2></div><button disabled={!runId || Boolean(busy)} onClick={invokeHarness}>{busy === "harness" ? "Starting…" : "Start investigation"}</button></div><p className="muted">The operations agent reviews the selected situation, checks the current business state, and explains its recommendation. After an approved change, it checks the result again.</p><p className="hint">{agentTurnCount} reasoning step(s) · {agentToolRequestCount} system check(s) · {toolObservationCount} evidence item(s)</p>{harness ? <pre className="result-box">{harness.text || JSON.stringify(harness, null, 2)}</pre> : <p className="empty-state">Start the investigation after creating a situation.</p>}{harnessSessionId && <p className="hint">This investigation can continue after an approved change.</p>}</article></section>
+      <section className="dashboard-grid lower-grid"><article className="panel device-panel"><div className="section-heading"><div><p className="eyebrow">FLEET VIEW</p><h2>Devices</h2></div><span className="muted">{devices.length ? `${snapshot?.summary.entity_counts.devices} total · showing ${devices.length}` : ""}</span></div>{devices.length ? <div className="table-wrap"><table><caption className="sr-only">Synthetic device fleet</caption><thead><tr><th>Device</th><th>Office</th><th>Health</th><th>Connectivity</th></tr></thead><tbody>{devices.map((device) => <tr key={device.device_id} onClick={() => openEntity("device", device.device_id)}><td><button className="link-button" onClick={(event) => { event.stopPropagation(); openEntity("device", device.device_id); }}>{device.device_id}</button><small>{device.hostname}</small></td><td>{device.office}</td><td><StatusPill tone={device.status === "healthy" ? "good" : "warn"}>{device.status}</StatusPill></td><td><StatusPill tone={device.vpn_status === "connected" ? "good" : "bad"}>{device.vpn_status}</StatusPill></td></tr>)}</tbody></table></div> : <p className="empty-state">No run devices to display.</p>}</article><article className="panel agent-panel"><div className="section-heading"><div><p className="eyebrow">AGENT INVESTIGATION</p><h2>Investigation activity</h2></div><StatusPill tone={investigationProgress.state === "failed" ? "bad" : investigationProgress.state === "waiting" ? "warn" : investigationProgress.state === "complete" ? "good" : "neutral"}>{investigationProgress.title}</StatusPill></div><p className="muted">The operations agent reviews the selected situation, checks the current business state, and explains its recommendation. After an approved change, it checks the result again.</p>{runId && <InvestigationProgressCard progress={investigationProgress} />}<p className="hint">{agentTurnCount} reasoning step(s) · {agentToolRequestCount} system check(s) · {toolObservationCount} evidence item(s)</p>{harness ? harness.text ? <AgentReport report={harness.text} /> : <pre className="result-box">{JSON.stringify(harness, null, 2)}</pre> : <p className="empty-state">Use “Start investigation” above to begin.</p>}{harnessSessionId && <p className="hint">This investigation can continue after an approved change.</p>}</article></section>
 
       <section className="panel evaluation-panel"><div className="section-heading"><div><p className="eyebrow">INDEPENDENT EVALUATION</p><h2>Score the authoritative run</h2></div><button className="secondary" disabled={!runId || Boolean(busy)} onClick={evaluateCurrentRun}>{busy === "evaluation" ? "Scoring…" : "Evaluate run"}</button></div><p className="muted">The evaluator reads simulator state, durable events, and typed observations. It does not trust the agent’s final prose.</p>{evaluation ? <><div className="evaluation-summary"><StatusPill tone={evaluation.status === "passed" ? "good" : "bad"}>{`${evaluation.status} · ${evaluation.score}%`}</StatusPill><span>{evaluation.metrics.tool_call_count || 0} observations · {evaluation.metrics.mutation_event_count || 0} mutation events · {evaluation.metrics.recovery_event_count || 0} recovery events</span></div><div className="evaluation-failures">{evaluation.assertions.filter((assertion) => !assertion.passed).slice(0, 4).map((assertion) => <button className="evidence-link" key={assertion.name} onClick={() => jumpToEvidence(assertion)}>{assertion.name}</button>)}</div></> : <p className="empty-state">Evaluate after collecting evidence or completing a remediation.</p>}</section>
 

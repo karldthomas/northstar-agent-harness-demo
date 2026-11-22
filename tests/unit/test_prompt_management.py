@@ -30,6 +30,7 @@ def test_local_prompt_seed_renders_explicit_run_context_without_python_prose() -
     assert "Find the affected devices" in rendered.text
     assert "Scenario run ID: run-42" in rendered.text
     assert "Incident ID: INC-0007" in rendered.text
+    assert "never pass `all`" in rendered.text
     assert "Proposed change:" in rendered.text
 
 

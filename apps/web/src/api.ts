@@ -22,6 +22,7 @@ export type Scenario = {
   profile: string;
   read_only_tools: string[];
   restricted_actions: string[];
+  primary_incident_id?: string | null;
 };
 
 export type Summary = {

@@ -35,6 +35,7 @@ from .configuration import (
     validate_harness_config,
 )
 from simulator.api import store
+from simulator.fixtures import scenario_definition
 from simulator.store import SimulatorError
 
 
@@ -120,6 +121,47 @@ def _context(request: HarnessInvocationRequest, principal: Principal | None = No
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+def _investigation_context(
+    request: HarnessInvocationRequest,
+) -> tuple[str | None, dict[str, Any]]:
+    """Build compact, authoritative anchors for the managed investigation prompt."""
+
+    run = store.get_run(request.scenario_run_id)
+    definition = scenario_definition(run.scenario_id)
+    requested_incident_id = str(request.incident_id or "").strip()
+    incident_id = requested_incident_id if requested_incident_id in run.state.incidents else None
+    if incident_id is None and definition.primary_incident_id in run.state.incidents:
+        incident_id = definition.primary_incident_id
+    if incident_id is None:
+        open_incidents = sorted(
+            incident.incident_id
+            for incident in run.state.incidents.values()
+            if incident.status == "open"
+        )
+        incident_id = open_incidents[0] if len(open_incidents) == 1 else None
+
+    incident = run.state.incidents.get(incident_id or "")
+    service_id = incident.service_id if incident else None
+    deployment_id = incident.related_deployment_id if incident else None
+    affected_device_ids = list(incident.affected_device_ids) if incident else []
+    return incident_id, {
+        "scenario_id": run.scenario_id,
+        "scenario_name": definition.name,
+        "required_read_only_tools": list(definition.read_only_tools),
+        "available_service_ids": sorted(run.state.services),
+        "open_incident_ids": sorted(
+            item.incident_id for item in run.state.incidents.values() if item.status == "open"
+        ),
+        "investigation_anchors": {
+            "primary_incident_id": incident_id,
+            "service_id": service_id,
+            "related_deployment_id": deployment_id,
+            "affected_device_count": len(affected_device_ids),
+            "sample_device_id": affected_device_ids[0] if affected_device_ids else None,
+        },
+    }
+
+
 def _prompt(request: HarnessInvocationRequest, context: InvocationContext) -> RenderedPrompt:
     resume_fields = (request.approval_id, request.operation_id, request.action)
     if any(value is not None for value in resume_fields):
@@ -136,11 +178,13 @@ def _prompt(request: HarnessInvocationRequest, context: InvocationContext) -> Re
             action=request.action or "",
             gateway_context_token=context.gateway_context_token,
         )
+    incident_id, runtime_context = _investigation_context(request)
     return render_investigation_prompt(
         request.objective,
         scenario_run_id=request.scenario_run_id,
-        incident_id=request.incident_id,
+        incident_id=incident_id,
         gateway_context_token=context.gateway_context_token,
+        runtime_context=runtime_context,
     )
 
 

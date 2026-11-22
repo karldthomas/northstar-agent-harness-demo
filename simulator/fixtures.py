@@ -26,6 +26,23 @@ SCENARIO_DIRECTORY = ROOT / "scenarios" / "definitions"
 DEFAULT_SEED = 20261120
 
 
+def _primary_incident_id(profile: str) -> str | None:
+    """Return the incident that anchors evidence for a scenario profile."""
+
+    normalized = str(profile or "").strip().lower()
+    if normalized.startswith("partial"):
+        return "INC-0002"
+    if normalized.startswith("interrupted") or normalized.startswith("memory-unavailable"):
+        return "INC-0005"
+    if normalized.startswith("payments") or normalized == "service-outage":
+        return "INC-0003"
+    if normalized.startswith("access") or normalized == "unauthorized-access-request":
+        return "INC-0004"
+    if normalized.startswith("vpn"):
+        return "INC-0001"
+    return None
+
+
 def load_scenarios() -> dict[str, ScenarioDefinition]:
     """Load scenario metadata from versioned JSON definitions."""
 
@@ -45,6 +62,11 @@ def load_scenarios() -> dict[str, ScenarioDefinition]:
                 read_only_tools=tuple(str(value) for value in payload["read_only_tools"]),
                 restricted_actions=tuple(str(value) for value in payload.get("restricted_actions", [])),
                 fixture_profile=(str(payload["fixture_profile"]) if payload.get("fixture_profile") else None),
+                primary_incident_id=(
+                    str(payload["primary_incident_id"])
+                    if payload.get("primary_incident_id")
+                    else _primary_incident_id(str(payload.get("fixture_profile") or payload["profile"]))
+                ),
             )
             if definition.scenario_id in scenarios:
                 raise ValueError(f"duplicate scenario id: {definition.scenario_id}")

@@ -10,11 +10,34 @@ behind the application API until the Harness resumption design is implemented.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from harness.configuration import READ_ONLY_TOOL_NAMES
-from simulator.api import store
-from simulator.store import SimulatorError
+from simulator.persistence import DynamoDBRunRepository
+from simulator.store import SimulatorError, SimulatorStore
+
+
+def _build_store() -> SimulatorStore:
+    """Use a read-only-backed store without importing the HTTP API module."""
+
+    table_name = os.environ.get("NORTHSTAR_STATE_TABLE_NAME", "").strip()
+    if table_name:
+        return SimulatorStore(
+            persistence=DynamoDBRunRepository(
+                table_name,
+                region=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"),
+            )
+        )
+
+    # Keep local tests and development aligned with the seeded in-memory API
+    # store, while the deployed hook avoids the API module's demo-run write.
+    from simulator.api import store as local_store
+
+    return local_store
+
+
+store = _build_store()
 
 
 def _tool_name(event: dict[str, Any]) -> str:

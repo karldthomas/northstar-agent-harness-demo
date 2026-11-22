@@ -9,6 +9,7 @@ from collections import Counter
 from hmac import compare_digest
 import re
 import secrets
+import time
 from threading import RLock
 from typing import Any, Callable
 from uuid import uuid4
@@ -62,6 +63,10 @@ class PersistenceConflictError(SimulatorError):
     """Raised when a stale process attempted to overwrite a newer run."""
 
     code = "PERSISTENCE_CONFLICT"
+
+
+PERSISTENCE_RETRY_ATTEMPTS = 5
+PERSISTENCE_RETRY_BACKOFF_SECONDS = 0.02
 
 
 def _status_counts(values: Any) -> dict[str, int]:
@@ -711,9 +716,9 @@ class SimulatorStore:
             return deepcopy(compacted)
 
     def record_observation(self, run_id: str, observation: dict[str, Any]) -> None:
-        with self._lock:
-            run = self.get_run(run_id)
-            recorded = deepcopy(observation)
+        recorded = deepcopy(observation)
+
+        def append_observation(run: ScenarioRun) -> None:
             run.observations.append(recorded)
             self._record_event(
                 run,
@@ -728,11 +733,12 @@ class SimulatorStore:
                 },
             )
 
+        self._with_persistence_retry(run_id, append_observation)
+
     def record_harness_event(self, run_id: str, event_type: str, payload: dict[str, Any]) -> None:
         """Append a normalized managed-Harness lifecycle event to the run."""
 
-        with self._lock:
-            run = self.get_run(run_id)
+        def append_harness_event(run: ScenarioRun) -> None:
             enriched = deepcopy(payload)
             if event_type == "agent_turn_started":
                 enriched.setdefault(
@@ -745,6 +751,8 @@ class SimulatorStore:
                     ),
                 )
             self._record_event(run, event_type, enriched)
+
+        self._with_persistence_retry(run_id, append_harness_event)
 
     def record_mutation(self, run_id: str, event_type: str, payload: dict[str, Any]) -> None:
         with self._lock:
@@ -1396,6 +1404,23 @@ class SimulatorStore:
                 raise PersistenceConflictError(
                     f"scenario run {run.run_id} changed concurrently; retry against the latest state"
                 ) from exc
+
+    def _with_persistence_retry(
+        self,
+        run_id: str,
+        operation: Callable[[ScenarioRun], None],
+    ) -> None:
+        """Retry append-only event writes after another Lambda wins the race."""
+
+        for attempt in range(PERSISTENCE_RETRY_ATTEMPTS):
+            try:
+                with self._lock:
+                    operation(self.get_run(run_id))
+                return
+            except PersistenceConflictError:
+                if attempt + 1 >= PERSISTENCE_RETRY_ATTEMPTS:
+                    raise
+                time.sleep(PERSISTENCE_RETRY_BACKOFF_SECONDS * (2**attempt))
 
     def read(self, run_id: str, reader: Callable[[ScenarioRun], Any]) -> Any:
         """Run a read-only callback while holding the store lock."""
