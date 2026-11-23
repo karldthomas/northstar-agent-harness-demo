@@ -59,28 +59,79 @@ commands.
 
 ## Screenshots and walkthrough
 
-The hosted console starts with Cognito sign-in:
+The following walkthrough follows an investigation of **INC-0005 — Interrupted
+VPN investigation**, which affects 40 London employees and their devices. The screenshots
+show the console's main path from access and scenario selection through agent
+reasoning, evidence, recommendation, and replayable history.
 
-![Northstar Cognito sign-in](docs/screenshots/login.jpg)
+### 1. Sign in
 
-After authentication, select an incident scenario and create an isolated run:
+Northstar is invite-only. An administrator must give each user access before
+they can sign in.
 
-![Northstar operations dashboard](docs/screenshots/dashboard.jpg)
+![Northstar sign-in and access screen](images/northstar-sign-in.png)
 
-The console then shows the authoritative environment, investigation activity,
-tool observations, and the replayable event timeline:
+### 2. Choose a business situation
 
-![Northstar evidence timeline](docs/screenshots/evidence-timeline.jpg)
+Select a scenario and review its description and investigation goal before
+starting. The console explains what the situation simulates, who is affected,
+and what the agent needs to determine.
 
-### Walkthrough
+![Northstar scenario catalog](images/scenario-catalog.png)
 
-1. Sign in with a Cognito user invited by an administrator.
-2. Select an incident scenario from the catalog.
-3. Create a run to load the deterministic digital twin.
-4. Start the investigation and watch its progress, system checks, and typed
-   evidence appear in the timeline.
-5. Propose and approve a synthetic remediation when the scenario requires it.
-6. Execute the change and use the independent evaluator to verify the outcome.
+### 3. Review the agent's recommendation
+
+After the agent investigates, the human-approval panel summarizes the proposed
+change, scope, approval requirement, execution status, and evidence. In this
+example, the recommendation does not match an executable action allowed for
+the scenario, so Northstar fails closed and creates no approval request.
+
+![Northstar human approval panel](images/human-approval-recommendation.png)
+
+### 4. Inspect authoritative state
+
+The environment view gives the team a current snapshot: device count and
+health, connectivity, services, and open incidents. The service graph shows
+dependencies so the investigation can separate service-wide failures from
+device-level issues.
+
+![Northstar authoritative environment and service graph](images/authoritative-environment-and-services.png)
+
+### 5. Read the agent's findings
+
+The expanded report records the evidence and reasoning behind the
+recommendation, including service health, affected devices, recent
+deployments, root cause, and impact. The findings view keeps the report
+available for review after the run completes.
+
+![Northstar agent report](images/agent-report.png)
+
+![Northstar investigation findings](images/investigation-findings.png)
+
+### 6. Inspect affected devices
+
+The fleet view makes the scope concrete by listing devices, offices, health,
+and connectivity state. Here, the affected London devices are degraded and
+disconnected from VPN.
+
+![Northstar fleet view](images/device-fleet.png)
+
+### 7. Follow investigation progress
+
+The live progress card shows the run's lifecycle: run created, agent planning,
+evidence collection, recommendation building, and ready for review. The latest
+activity makes the current stage easy to scan.
+
+![Northstar investigation progress](images/investigation-progress.png)
+
+### 8. Replay what happened
+
+The execution timeline preserves the run as ordered events—scenario creation,
+agent invocation, reasoning passes, tool calls, observations, and subsequent
+decisions. This makes the investigation auditable and replayable rather than
+just a final answer.
+
+![Northstar replayable execution timeline](images/execution-timeline.png)
 
 ## AgentCore services
 
