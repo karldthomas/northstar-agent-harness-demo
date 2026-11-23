@@ -15,6 +15,7 @@ import {
   type Session,
   type Snapshot,
   type Topology,
+  type ToolObservation,
   loadSession,
   request,
   saveSession,
@@ -154,6 +155,18 @@ function displayToolName(value: unknown): string {
   return tool ? tool.replace(/\b\w/g, (character) => character.toUpperCase()) : "System check";
 }
 
+function toolPurpose(value: unknown): string {
+  const tool = String(value || "").replace(/^.*___/, "");
+  return {
+    check_service_health: "Checks current service status, version, criticality, and dependencies.",
+    get_device_diagnostics: "Checks one affected device’s status, VPN state, software, and incident links.",
+    get_incident: "Establishes incident status, severity, impact, timeline, and related deployment.",
+    find_affected_devices: "Expands the incident scope to concrete devices and their connectivity state.",
+    list_recent_deployments: "Looks for recent changes that correlate with the incident.",
+    search_knowledge: "Finds relevant synthetic runbook guidance for the symptoms.",
+  }[tool] || "Reads bounded evidence from the synthetic operations environment.";
+}
+
 function progressActivity(event: EventRecord): { title: string; detail: string; occurredAt: string } {
   const payload = event.payload || {};
   const tool = displayToolName(payload.tool_name);
@@ -254,6 +267,137 @@ function InvestigationProgressCard({ progress }: { progress: InvestigationProgre
     </ol>
     {progress.latest && <div className="latest-activity"><span className="activity-pulse" /><div><span>Latest activity</span><strong>{progress.latest.title}</strong><small>{progress.latest.detail}</small></div><time dateTime={progress.latest.occurredAt}>{new Date(progress.latest.occurredAt).toLocaleTimeString()}</time></div>}
   </div>;
+}
+
+function recordValue(payload: Record<string, unknown>, key: string): unknown {
+  return payload[key];
+}
+
+function recordString(payload: Record<string, unknown>, key: string, fallback = ""): string {
+  const value = recordValue(payload, key);
+  return typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? String(value) : fallback;
+}
+
+function recordList(payload: Record<string, unknown>, key: string): Array<Record<string, unknown>> {
+  const value = recordValue(payload, key);
+  return Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item))) : [];
+}
+
+function jsonText(value: unknown, fallback = "{}"): string {
+  try {
+    return JSON.stringify(value, null, 2) || fallback;
+  } catch {
+    return String(value);
+  }
+}
+
+function observationForEvent(event: EventRecord, observations: ToolObservation[]): ToolObservation | null {
+  const requestId = recordString(event.payload, "request_id");
+  if (requestId) {
+    return observations.find((observation) => recordString(observation, "request_id") === requestId) || null;
+  }
+  const toolName = recordString(event.payload, "tool_name");
+  return observations.filter((observation) => recordString(observation, "tool_name") === toolName).at(-1) || null;
+}
+
+function toolInputForRequest(event: EventRecord, events: EventRecord[]): string {
+  const toolUseId = recordString(event.payload, "tool_use_id");
+  const contentBlockIndex = recordValue(event.payload, "content_block_index");
+  const inputs = events
+    .filter((candidate) => candidate.event_type === "agent_tool_call_input" && candidate.sequence > event.sequence)
+    .filter((candidate) => {
+      const candidateToolUseId = recordString(candidate.payload, "tool_use_id");
+      const candidateBlockIndex = recordValue(candidate.payload, "content_block_index");
+      return (toolUseId && candidateToolUseId === toolUseId)
+        || (contentBlockIndex !== undefined && candidateBlockIndex === contentBlockIndex);
+    })
+    .sort((left, right) => left.sequence - right.sequence)
+    .map((candidate) => recordValue(candidate.payload, "tool_input"));
+  if (!inputs.length) return "";
+  if (inputs.length === 1 && typeof inputs[0] !== "string") return jsonText(inputs[0]);
+  return inputs.map((input) => typeof input === "string" ? input : jsonText(input)).join("");
+}
+
+function nextTurnAfter(event: EventRecord, events: EventRecord[]): EventRecord | null {
+  return events.find((candidate) => candidate.sequence > event.sequence && candidate.event_type === "agent_turn_started") || null;
+}
+
+function traceEventLabel(event: EventRecord): string {
+  switch (event.event_type) {
+    case "skills_selected": return "Guidance selected";
+    case "agent_turn_started": return "Turn " + recordString(event.payload, "turn_index", "?") + " · planning";
+    case "agent_tool_call_requested": return "Tool selected · " + displayToolName(recordString(event.payload, "tool_name", "system check"));
+    case "agent_hook_decision": return "Safety hook · " + recordString(event.payload, "decision", "unknown");
+    case "observation_recorded": return "Observation · " + displayToolName(recordString(event.payload, "tool_name", "system check"));
+    case "agent_turn_completed": return "Loop transition";
+    case "agent_invocation_completed": return "Investigation response complete";
+    case "agent_error": return "Investigation error";
+    default: return event.event_type.replaceAll("_", " ");
+  }
+}
+
+function traceEventDescription(event: EventRecord, events: EventRecord[]): string {
+  const payload = event.payload || {};
+  switch (event.event_type) {
+    case "agent_turn_started":
+      return "The managed agent started a new turn and can use the available guidance and read-only tools.";
+    case "agent_tool_call_requested":
+      return toolPurpose(payload.tool_name) + " Harness requested this bounded read-only check; the stream records the tool choice, but not private model rationale.";
+    case "agent_hook_decision":
+      return recordString(payload, "reason", "The configured lifecycle hook evaluated this tool request.");
+    case "observation_recorded":
+      return recordString(payload, "status", "unknown") + " · " + (payload.authoritative === true ? "authoritative result" : "result recorded") + " · revision " + recordString(payload, "state_revision", "?") + (nextTurnAfter(event, events) ? " · fed into the next recorded turn" : " · no later turn recorded");
+    case "agent_turn_completed":
+      return "Harness returned " + recordString(payload, "stop_reason", "unknown") + "; another turn may follow if the evidence is incomplete.";
+    case "agent_invocation_completed":
+      return recordString(payload, "turn_count", "0") + " turn(s) · " + recordString(payload, "tool_call_count", "0") + " tool call(s) · " + recordString(payload, "stop_reason", "complete");
+    case "agent_error":
+      return recordString(payload, "error_code", "error") + ": " + recordString(payload, "message", "The managed investigation failed.");
+    default:
+      return eventDetail(event) || "Recorded in the authoritative run timeline.";
+  }
+}
+
+function TraceStep({ event, events, observations }: { event: EventRecord; events: EventRecord[]; observations: ToolObservation[] }) {
+  const observation = event.event_type === "observation_recorded" ? observationForEvent(event, observations) : null;
+  const toolInput = event.event_type === "agent_tool_call_requested" ? toolInputForRequest(event, events) : "";
+  const nextTurn = event.event_type === "observation_recorded" ? nextTurnAfter(event, events) : null;
+  return <article className={"trace-step " + event.event_type}>
+    <span className="trace-step-marker">{event.sequence}</span><div><strong>{traceEventLabel(event)}</strong><p>{traceEventDescription(event, events)}</p>
+      {toolInput && <details className="trace-tool-input"><summary>Recorded tool input</summary><pre className="result-box">{toolInput}</pre></details>}
+      {observation && <details className="trace-evidence" open><summary>Authoritative result · {recordString(observation, "status", "unknown")}</summary><pre className="result-box">{jsonText(observation.data ?? observation.error ?? observation)}</pre></details>}
+      {observation && <p className="trace-next">{nextTurn ? "Next recorded step: turn " + recordString(nextTurn.payload, "turn_index", "?") + "." : "This was the last recorded evidence step before the response."}</p>}
+      <small>{new Date(event.occurred_at).toLocaleTimeString()} · event {event.sequence}</small>
+    </div>
+  </article>;
+}
+
+function TeachingTrace({ events, observations }: { events: EventRecord[]; observations: ToolObservation[] }) {
+  const selectionEvent = events.slice().reverse().find((event) => event.event_type === "skills_selected");
+  const selectionPayload = selectionEvent?.payload || {};
+  const selectedSkills = recordList(selectionPayload, "selected_skills");
+  const traceEvents = events.filter((event) => [
+    "agent_turn_started",
+    "agent_tool_call_requested",
+    "agent_hook_decision",
+    "observation_recorded",
+    "agent_turn_completed",
+    "agent_invocation_completed",
+    "agent_error",
+  ].includes(event.event_type));
+
+  return <section className="panel teaching-panel">
+    <div className="section-heading"><div><p className="eyebrow">TEACHING TRACE</p><h2>Guidance and tool loop</h2></div><StatusPill tone={selectedSkills.length ? "good" : "neutral"}>{selectedSkills.length ? String(selectedSkills.length) + " skill(s) selected" : "Waiting for guidance trace"}</StatusPill></div>
+    <p className="muted">The cards below are Northstar’s display-only mapping from the scenario to configured guidance; AgentCore does not emit skill-attribution telemetry. The loop is actual run telemetry: tool requests, safety-hook decisions, full authoritative results, and the next recorded turn. It does not expose hidden chain-of-thought.</p>
+    {selectedSkills.length ? <div className="skill-trace-grid">{selectedSkills.map((skill) => <article className="skill-trace-card" key={recordString(skill, "id")}>
+      <div className="skill-trace-heading"><div><strong>{recordString(skill, "name", recordString(skill, "id", "Guidance package"))}</strong><small>{recordString(skill, "id")}</small></div><StatusPill tone="good">selected</StatusPill></div>
+      <p>{recordString(skill, "description", "Reference guidance supplied to this run.")}</p>
+      <p className="trace-reason"><strong>Why it applies:</strong> {recordString(skill, "selection_reason")}</p>
+      {recordString(skill, "runtime_source") && <small className="trace-source">Source: {recordString(skill, "runtime_source")}</small>}
+      {recordString(skill, "text") && <details className="skill-source" open><summary>Skill text · reference copy</summary><pre className="result-box">{recordString(skill, "text")}</pre></details>}
+    </article>)}</div> : selectionEvent ? <p className="empty-state">No configured skill was selected for this invocation.</p> : <p className="empty-state">Start an investigation to record its guidance selection and loop.</p>}
+    {traceEvents.length > 0 && <div className="trace-loop"><div className="trace-loop-heading"><strong>Observable loop</strong><span className="muted">Guidance → tool request → safety check → evidence → next turn</span></div>{traceEvents.map((event) => <TraceStep key={event.scenario_run_id + "-" + event.sequence} event={event} events={events} observations={observations} />)}</div>}
+  </section>;
 }
 
 function PromptLibrary({ session }: { session: Session }) {
@@ -651,6 +795,8 @@ function Dashboard({ session, principal, onSignOut }: { session: Session; princi
 
       <section className="dashboard-grid lower-grid"><article className="panel device-panel"><div className="section-heading"><div><p className="eyebrow">FLEET VIEW</p><h2>Devices</h2></div><span className="muted">{devices.length ? `${snapshot?.summary.entity_counts.devices} total · showing ${devices.length}` : ""}</span></div>{devices.length ? <div className="table-wrap"><table><caption className="sr-only">Synthetic device fleet</caption><thead><tr><th>Device</th><th>Office</th><th>Health</th><th>Connectivity</th></tr></thead><tbody>{devices.map((device) => <tr key={device.device_id} onClick={() => openEntity("device", device.device_id)}><td><button className="link-button" onClick={(event) => { event.stopPropagation(); openEntity("device", device.device_id); }}>{device.device_id}</button><small>{device.hostname}</small></td><td>{device.office}</td><td><StatusPill tone={device.status === "healthy" ? "good" : "warn"}>{device.status}</StatusPill></td><td><StatusPill tone={device.vpn_status === "connected" ? "good" : "bad"}>{device.vpn_status}</StatusPill></td></tr>)}</tbody></table></div> : <p className="empty-state">No run devices to display.</p>}</article><article className="panel agent-panel"><div className="section-heading"><div><p className="eyebrow">AGENT INVESTIGATION</p><h2>Investigation activity</h2></div><StatusPill tone={investigationProgress.state === "failed" ? "bad" : investigationProgress.state === "waiting" ? "warn" : investigationProgress.state === "complete" ? "good" : "neutral"}>{investigationProgress.title}</StatusPill></div><p className="muted">The operations agent reviews the selected situation, checks the current business state, and explains its recommendation. After an approved change, it checks the result again.</p>{runId && <InvestigationProgressCard progress={investigationProgress} />}<p className="hint">{agentTurnCount} reasoning step(s) · {agentToolRequestCount} system check(s) · {toolObservationCount} evidence item(s)</p>{harness ? harness.text ? <AgentReport report={harness.text} /> : <pre className="result-box">{JSON.stringify(harness, null, 2)}</pre> : <p className="empty-state">Use “Start investigation” above to begin.</p>}{harnessSessionId && <p className="hint">This investigation can continue after an approved change.</p>}</article></section>
 
+      <TeachingTrace events={events} observations={snapshot?.observations || []} />
+
       <section className="panel evaluation-panel"><div className="section-heading"><div><p className="eyebrow">INDEPENDENT EVALUATION</p><h2>Score the authoritative run</h2></div><button className="secondary" disabled={!runId || Boolean(busy)} onClick={evaluateCurrentRun}>{busy === "evaluation" ? "Scoring…" : "Evaluate run"}</button></div><p className="muted">The evaluator reads simulator state, durable events, and typed observations. It does not trust the agent’s final prose.</p>{evaluation ? <><div className="evaluation-summary"><StatusPill tone={evaluation.status === "passed" ? "good" : "bad"}>{`${evaluation.status} · ${evaluation.score}%`}</StatusPill><span>{evaluation.metrics.tool_call_count || 0} observations · {evaluation.metrics.mutation_event_count || 0} mutation events · {evaluation.metrics.recovery_event_count || 0} recovery events</span></div><div className="evaluation-failures">{evaluation.assertions.filter((assertion) => !assertion.passed).slice(0, 4).map((assertion) => <button className="evidence-link" key={assertion.name} onClick={() => jumpToEvidence(assertion)}>{assertion.name}</button>)}</div></> : <p className="empty-state">Evaluate after collecting evidence or completing a remediation.</p>}</section>
 
       <section className="panel timeline-panel"><div className="section-heading"><div><p className="eyebrow">REPLAYABLE EVENT LOG</p><h2>Execution timeline</h2></div><span className="muted">{runId ? `sequence ${cursor}` : "No run selected"}</span></div>{events.length ? <div className="timeline">{events.slice(-80).map((event) => <div className="timeline-item" id={`event-${event.sequence}`} key={`${event.scenario_run_id}-${event.sequence}`}><span className="sequence">{event.sequence}</span><div><strong>{event.event_type}</strong><small>{event.occurred_at} · revision {event.state_revision}</small><p>{eventDetail(event)}</p></div></div>)}</div> : <p className="empty-state">Events will appear here and replay from the authoritative sequence.</p>}</section>
@@ -662,7 +808,10 @@ function Dashboard({ session, principal, onSignOut }: { session: Session; princi
 function formatCounts(counts: Record<string, number> | undefined): string { return Object.entries(counts || {}).map(([key, value]) => `${value} ${key}`).join(" · ") || "—"; }
 function eventDetail(event: EventRecord): string {
   const payload = event.payload || {};
+  if (event.event_type === "skills_selected") return `selected: ${Array.isArray(payload.selected_skill_ids) ? payload.selected_skill_ids.join(", ") || "none" : "none"}`;
   if (event.event_type === "agent_tool_call_requested") return `${String(payload.tool_name || "tool")} · ${String(payload.tool_use_id || "request")}`;
+  if (event.event_type === "agent_tool_call_input") return `${String(payload.tool_name || "tool")} · ${JSON.stringify(payload.tool_input || {})}`;
+  if (event.event_type === "agent_hook_decision") return `${String(payload.decision || "unknown")} · ${String(payload.reason || "")}`;
   if (event.event_type === "agent_turn_started") return `turn ${String(payload.turn_index || "?")} · request ${String(payload.request_id || "")}`;
   if (event.event_type === "agent_turn_completed") return `stop reason: ${String(payload.stop_reason || "unknown")}`;
   if (event.event_type === "agent_invocation_started") return `session ${String(payload.session_id || "")}`;

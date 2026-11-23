@@ -55,6 +55,7 @@ export type Snapshot = {
   state: { devices: Record<string, Device>; incidents: Record<string, Incident>; services: Record<string, Service>; [key: string]: Record<string, unknown> };
   faults: Record<string, string[]>;
   events: EventRecord[];
+  observations?: ToolObservation[];
   observation_count: number;
 };
 
@@ -62,6 +63,7 @@ export type Topology = { run_id: string; state_revision: number; services: Servi
 export type Comparison = { before: { revision: number; summary: Summary }; after: { revision: number; summary: Summary }; changed: Record<string, Array<Record<string, unknown>>> };
 export type EventRecord = { sequence: number; event_type: string; scenario_run_id: string; state_revision: number; occurred_at: string; payload: Record<string, unknown> };
 export type EventPage = { events: EventRecord[]; next_sequence: number; latest_sequence: number; has_more: boolean };
+export type ToolObservation = { schema_version?: string; tool_name?: string; scenario_run_id?: string; request_id?: string | null; status?: string; read_only?: boolean; authoritative?: boolean; state_revision?: number; observed_at?: string; data?: unknown; error?: unknown; [key: string]: unknown };
 export type Approval = { approval_id: string; operation_id: string; action: string; run_id: string; requested_by: string; target_ids: string[]; payload: Record<string, unknown>; parameters_hash: string; expires_at: string; status: string; decided_by?: string | null; decision_reason?: string | null; decided_at?: string | null; executed_at?: string | null; verified_at?: string | null; created_at: string };
 export type HarnessRecommendation = { proposed_change: string; scope: string; approval_required: string; approval_required_yes: boolean; evidence: string; execution_status: string; actionable: boolean; structured: boolean };
 export type HarnessResult = { text?: string; status?: string; succeeded?: boolean; recommendation?: HarnessRecommendation; tool_uses?: unknown[]; turn_count?: number; event_count?: number; events?: unknown[]; [key: string]: unknown };

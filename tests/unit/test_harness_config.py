@@ -16,6 +16,7 @@ from harness.configuration import (
     invoke_overrides,
     load_harness_config,
     resolve_harness_config,
+    skill_guidance_trace,
     validate_harness_config,
 )
 
@@ -83,6 +84,27 @@ def test_harness_config_rejects_wildcards_and_path_traversal() -> None:
     assert any("traverse" in error for error in errors)
     with pytest.raises(HarnessConfigurationError):
         invoke_overrides(config)
+
+
+def test_skill_guidance_trace_records_scenario_relevant_text_without_changing_config() -> None:
+    config = load_harness_config(ROOT / "harness" / "config" / "northstar-harness.yaml")
+
+    trace = skill_guidance_trace(
+        config,
+        scenario_profile="vpn-deployment-failure",
+        restricted_actions=("rollback_deployment",),
+    )
+
+    assert trace["selection_mode"] == "scenario-profile-teaching-trace"
+    assert trace["selected_skill_ids"] == [
+        "vpn-diagnostics",
+        "incident-triage",
+        "safe-remediation",
+    ]
+    selected = {item["id"]: item for item in trace["selected_skills"]}
+    assert "# VPN Diagnostics" in selected["vpn-diagnostics"]["text"]
+    assert selected["safe-remediation"]["selection_reason"]
+    assert config["skills"]
 
 
 def test_gateway_openapi_contract_has_only_read_only_named_operations() -> None:

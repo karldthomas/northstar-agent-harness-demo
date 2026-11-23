@@ -32,6 +32,7 @@ from .configuration import (
     HarnessConfigurationError,
     load_harness_config,
     resolve_harness_config,
+    skill_guidance_trace,
     validate_harness_config,
 )
 from simulator.api import store
@@ -195,6 +196,46 @@ def _render_prompt(request: HarnessInvocationRequest, context: InvocationContext
         raise HTTPException(status_code=503, detail=f"Managed prompt is unavailable: {exc}") from exc
 
 
+def _skill_selection_payload(
+    request: HarnessInvocationRequest,
+    rendered_prompt: RenderedPrompt,
+) -> dict[str, Any]:
+    """Build observability metadata without changing the Harness request."""
+
+    try:
+        run = store.get_run(request.scenario_run_id)
+        definition = scenario_definition(run.scenario_id)
+        config_path = Path(os.environ.get("NORTHSTAR_HARNESS_CONFIG", str(DEFAULT_CONFIG_PATH)))
+        config = load_harness_config(config_path)
+        bucket = os.environ.get("NORTHSTAR_SKILLS_BUCKET", "").strip()
+        prefix = os.environ.get("NORTHSTAR_SKILLS_PREFIX", "").strip().rstrip("/")
+        runtime_source_prefix = f"s3://{bucket}/{prefix}" if bucket and prefix else None
+        payload = skill_guidance_trace(
+            config,
+            scenario_profile=definition.profile,
+            restricted_actions=definition.restricted_actions,
+            resuming=bool(request.approval_id),
+            runtime_source_prefix=runtime_source_prefix,
+        )
+        payload.update(rendered_prompt.metadata())
+        payload["invocation_kind"] = "approval_resumption" if request.approval_id else "investigation"
+        return payload
+    except Exception as exc:
+        # Teaching metadata is best effort. A missing local skill document or
+        # custom config must never change the managed invocation boundary.
+        return {
+            **rendered_prompt.metadata(),
+            "selection_mode": "unavailable",
+            "selected_skill_ids": [],
+            "selected_skills": [],
+            "available_skill_ids": [],
+            "skill_count": 0,
+            "invocation_kind": "approval_resumption" if request.approval_id else "investigation",
+            "selection_error": type(exc).__name__,
+            "note": "Teaching metadata was unavailable; AgentCore Harness invocation was not changed.",
+        }
+
+
 def _authorize_run(request: HarnessInvocationRequest, principal: Principal | None) -> None:
     """Apply the same actor/tenant run boundary to Harness as to simulator APIs."""
 
@@ -239,6 +280,40 @@ def _record_harness_lifecycle(
         pass
 
 
+_SENSITIVE_TOOL_INPUT_KEYS = {
+    "password",
+    "token",
+    "access_token",
+    "authorization",
+    "gateway_context_token",
+    "session_token",
+    "id_token",
+}
+
+
+def _redact_tool_input(value: Any) -> Any:
+    """Keep display-safe tool arguments without persisting capability tokens."""
+
+    if isinstance(value, dict):
+        return {
+            str(key): "[redacted]"
+            if str(key).lower() in _SENSITIVE_TOOL_INPUT_KEYS
+            else _redact_tool_input(item) if isinstance(item, (dict, list)) else item
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_tool_input(item) if isinstance(item, (dict, list)) else item for item in value]
+    if isinstance(value, str):
+        try:
+            return _redact_tool_input(json.loads(value))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            # Converse streaming sends partial JSON fragments. They cannot be
+            # safely inspected for sensitive fields until complete, so do not
+            # persist the fragment itself.
+            return "[redacted input fragment]"
+    return value
+
+
 def _record_harness_event(event: HarnessEvent) -> None:
     """Persist only useful lifecycle/tool markers, never model text deltas."""
 
@@ -252,6 +327,26 @@ def _record_harness_event(event: HarnessEvent) -> None:
             "harness_event_type": event.event_type,
             "tool_name": tool_use.get("name"),
             "tool_use_id": tool_use.get("toolUseId"),
+            "content_block_index": event.payload.get("contentBlockIndex"),
+        }
+    elif event.event_type == "contentBlockDelta" and tool_use and "input" in tool_use:
+        normalized_type = "agent_tool_call_input"
+        payload = {
+            "harness_event_type": event.event_type,
+            "tool_name": tool_use.get("name"),
+            "tool_use_id": tool_use.get("toolUseId"),
+            "content_block_index": event.payload.get("contentBlockIndex"),
+            "tool_input": _redact_tool_input(tool_use.get("input")),
+        }
+    elif event.event_type == "hookEvent":
+        normalized_type = "agent_hook_decision"
+        payload = {
+            "harness_event_type": event.event_type,
+            "hook_event_id": event.payload.get("hookEventId"),
+            "hook_name": event.payload.get("name"),
+            "hook_type": event.payload.get("type"),
+            "decision": event.payload.get("decision"),
+            "reason": event.payload.get("reason"),
         }
     elif event.event_type == "messageStop":
         normalized_type = "agent_turn_completed"
@@ -321,6 +416,12 @@ def invoke_harness(
     client = _client()
     context = _context(request, principal)
     rendered_prompt = _render_prompt(request, context)
+    _record_harness_lifecycle(
+        request.scenario_run_id,
+        "skills_selected",
+        context=context,
+        payload=_skill_selection_payload(request, rendered_prompt),
+    )
     _record_harness_lifecycle(
         request.scenario_run_id,
         "agent_invocation_started",
@@ -420,6 +521,13 @@ def stream_harness(
     client = _client()
     context = _context(request, principal)
     rendered_prompt = _render_prompt(request, context)
+    skill_selection = _skill_selection_payload(request, rendered_prompt)
+    _record_harness_lifecycle(
+        request.scenario_run_id,
+        "skills_selected",
+        context=context,
+        payload=skill_selection,
+    )
     _record_harness_lifecycle(
         request.scenario_run_id,
         "agent_invocation_started",

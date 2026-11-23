@@ -11,6 +11,7 @@ from typing import Any, Mapping
 
 
 ROOT = Path(__file__).resolve().parent.parent
+SKILLS_ROOT = ROOT / "harness" / "skills"
 DEFAULT_CONFIG_PATH = ROOT / "harness" / "config" / "northstar-harness.yaml"
 PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 READ_ONLY_TOOL_NAMES = (
@@ -28,6 +29,128 @@ READ_ONLY_GATEWAY_SELECTOR = "@northstar-simulator"
 READ_ONLY_TOOLS = (READ_ONLY_GATEWAY_SELECTOR,)
 HARNESS_VARIANTS = ("baseline", "skills-memory", "optimized")
 DEFAULT_HARNESS_VARIANT = "skills-memory"
+
+
+def _skill_id(skill: Mapping[str, Any]) -> str | None:
+    """Return the stable directory name for a configured skill source."""
+
+    path = skill.get("path")
+    if isinstance(path, str) and path.strip():
+        return Path(path.rstrip("/")).name
+    s3 = skill.get("s3")
+    if isinstance(s3, Mapping) and isinstance(s3.get("uri"), str):
+        return Path(str(s3["uri"]).rstrip("/")).name
+    git = skill.get("git")
+    if isinstance(git, Mapping) and isinstance(git.get("path"), str):
+        return Path(str(git["path"]).rstrip("/")).name
+    return None
+
+
+def _skill_document(skill_id: str) -> tuple[str, str, str]:
+    """Read the checked-in teaching copy for one skill when available."""
+
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", skill_id):
+        return skill_id, "", ""
+    path = (SKILLS_ROOT / skill_id / "SKILL.md").resolve()
+    try:
+        path.relative_to(SKILLS_ROOT.resolve())
+        text = path.read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        return skill_id, "", ""
+    name_match = re.search(r"(?m)^name:\s*(.+?)\s*$", text)
+    description_match = re.search(r"(?m)^description:\s*(.+?)\s*$", text)
+    return (
+        str(name_match.group(1)).strip() if name_match else skill_id.replace("-", " ").title(),
+        str(description_match.group(1)).strip() if description_match else "",
+        text,
+    )
+
+
+def skill_guidance_trace(
+    config: Mapping[str, Any],
+    *,
+    scenario_profile: str,
+    restricted_actions: tuple[str, ...] | list[str] = (),
+    resuming: bool = False,
+    runtime_source_prefix: str | None = None,
+) -> dict[str, Any]:
+    """Build display-only skill selection metadata for one invocation.
+
+    AgentCore still receives the configured skill list unchanged. This helper
+    records the deterministic teaching labels that explain why each guidance
+    package is relevant to the selected scenario; it does not route tools or
+    alter the model prompt.
+    """
+
+    profile = str(scenario_profile or "").strip().lower()
+    actions = tuple(str(action).strip() for action in restricted_actions if str(action).strip())
+    configured = config.get("skills", [])
+    if not isinstance(configured, list):
+        configured = []
+
+    selected_ids: set[str] = {"incident-triage"}
+    if "vpn" in profile or "interrupted" in profile:
+        selected_ids.add("vpn-diagnostics")
+    if actions:
+        selected_ids.add("safe-remediation")
+    if resuming or any(
+        marker in profile
+        for marker in ("partial", "timeout", "stale", "denied", "scope", "concurrent", "resume")
+    ):
+        selected_ids.add("post-change-verification")
+
+    entries: list[dict[str, Any]] = []
+    for item in configured:
+        if not isinstance(item, Mapping):
+            continue
+        skill_id = _skill_id(item)
+        if not skill_id:
+            continue
+        name, description, text = _skill_document(skill_id)
+        selected = skill_id in selected_ids
+        if skill_id == "incident-triage":
+            reason = "Correlate the incident with affected entities, service health, and deployment evidence."
+        elif skill_id == "vpn-diagnostics":
+            reason = f"The scenario profile {profile or 'selected scenario'} involves VPN or connectivity evidence."
+        elif skill_id == "safe-remediation":
+            reason = "The scenario exposes a restricted action that must remain approval-gated."
+        elif skill_id == "post-change-verification":
+            reason = "The run may be resuming or reconciling a prior operation and needs authoritative verification."
+        else:
+            reason = "Configured guidance package for this Harness run."
+        source = str(
+            item.get("path")
+            or (item.get("s3", {}).get("uri") if isinstance(item.get("s3"), Mapping) else "")
+            or (item.get("git", {}).get("url") if isinstance(item.get("git"), Mapping) else "")
+            or ""
+        )
+        runtime_source = source
+        if runtime_source_prefix:
+            runtime_source = f"{runtime_source_prefix.rstrip('/')}/{skill_id}/"
+        entry: dict[str, Any] = {
+            "id": skill_id,
+            "name": name,
+            "description": description,
+            "selected": selected,
+            "selection_reason": reason,
+            "source": source,
+            "runtime_source": runtime_source,
+        }
+        if selected and text:
+            entry["text"] = text
+        entries.append(entry)
+
+    selected = [entry for entry in entries if entry["selected"]]
+    return {
+        "selection_mode": "scenario-profile-teaching-trace",
+        "scenario_profile": profile,
+        "resuming": resuming,
+        "selected_skill_ids": [entry["id"] for entry in selected],
+        "selected_skills": selected,
+        "available_skill_ids": [entry["id"] for entry in entries],
+        "skill_count": len(entries),
+        "note": "Display-only metadata; AgentCore Harness retains control of orchestration and tool selection.",
+    }
 
 
 class HarnessConfigurationError(ValueError):

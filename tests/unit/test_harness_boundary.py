@@ -143,6 +143,52 @@ def test_live_timeline_markers_preserve_tool_progress_without_model_content(monk
     assert "do-not-store" not in serialized
 
 
+def test_hook_decisions_and_tool_input_are_recorded_without_private_or_secret_content(monkeypatch) -> None:
+    recorded: list[tuple[str, dict[str, object]]] = []
+
+    def capture(run_id, event_type, *, context, payload=None):
+        recorded.append((event_type, dict(payload or {})))
+
+    monkeypatch.setattr(harness_api, "_record_harness_lifecycle", capture)
+    common = {
+        "scenario_run_id": "run-monitor",
+        "session_id": "s" * 33,
+        "request_id": "request-monitor",
+        "trace_id": "trace-monitor",
+        "occurred_at": "2026-11-21T00:00:00+00:00",
+    }
+    harness_api._record_harness_event(
+        HarnessEvent(
+            event_type="hookEvent",
+            sequence=6,
+            payload={"hookEventId": "hook-1", "name": "read-only-guard", "type": "beforeToolCall", "decision": "allow", "reason": "read-only tool"},
+            **common,
+        )
+    )
+    harness_api._record_harness_event(
+        HarnessEvent(
+            event_type="contentBlockDelta",
+            sequence=7,
+            payload={
+                "contentBlockIndex": 2,
+                "delta": {
+                    "toolUse": {
+                        "input": '{"run_id":"run-monitor","gateway_context_token":"secret"}',
+                    }
+                },
+            },
+            **common,
+        )
+    )
+
+    assert recorded[0][0] == "agent_hook_decision"
+    assert recorded[0][1]["decision"] == "allow"
+    assert recorded[1][0] == "agent_tool_call_input"
+    assert recorded[1][1]["content_block_index"] == 2
+    assert recorded[1][1]["tool_input"]["gateway_context_token"] == "[redacted]"
+    assert "secret" not in json.dumps(recorded)
+
+
 def test_phase_zero_smoke_objective_bounds_tool_work_and_output() -> None:
     config = load_config()
 

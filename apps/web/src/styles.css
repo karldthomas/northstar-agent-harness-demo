@@ -102,6 +102,38 @@ input, select { background: #0e1721; border: 1px solid var(--line); border-radiu
 .latest-activity small { color: var(--muted); font-size: .68rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .latest-activity time { color: var(--muted); font-size: .65rem; white-space: nowrap; }
 @keyframes progress-pulse { 0%, 100% { opacity: .65; transform: scale(.9); } 50% { opacity: 1; transform: scale(1); } }
+.teaching-panel { margin-bottom: 18px; }
+.teaching-panel > .muted { max-width: 940px; }
+.teaching-panel > .muted strong, .trace-disclosure strong { color: var(--text); }
+.skill-trace-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin-top: 16px; }
+.skill-trace-card { background: #0e1721; border: 1px solid var(--line); border-radius: 10px; display: grid; gap: 8px; padding: 12px; }
+.skill-trace-card > p { color: var(--muted); font-size: .78rem; margin: 0; }
+.skill-trace-heading { align-items: flex-start; display: flex; gap: 10px; justify-content: space-between; }
+.skill-trace-heading > div { display: grid; gap: 2px; min-width: 0; }
+.skill-trace-heading strong { font-size: .86rem; }
+.skill-trace-heading small, .trace-source { color: var(--muted); font-size: .68rem; overflow-wrap: anywhere; }
+.trace-reason { border-left: 2px solid var(--accent); padding-left: 8px; }
+.trace-reason strong { color: var(--text); }
+.skill-source { border-top: 1px solid var(--line); margin-top: 2px; padding-top: 8px; }
+.skill-source summary { color: var(--accent); cursor: pointer; font-size: .74rem; }
+.skill-source .result-box { margin-top: 8px; max-height: 260px; }
+.trace-loop { border-top: 1px solid var(--line); display: grid; gap: 8px; margin-top: 18px; padding-top: 16px; }
+.trace-loop-heading { align-items: baseline; display: flex; flex-wrap: wrap; gap: 10px; justify-content: space-between; }
+.trace-loop-heading .muted { font-size: .72rem; }
+.trace-step { align-items: start; background: var(--panel-strong); border: 1px solid var(--line); border-radius: 9px; display: grid; gap: 10px; grid-template-columns: 30px 1fr; padding: 10px; }
+.trace-step-marker { align-items: center; background: var(--accent); border-radius: 50%; color: #08211c; display: inline-flex; font-size: .66rem; font-weight: 800; height: 24px; justify-content: center; width: 24px; }
+.trace-step > div { min-width: 0; }
+.trace-step strong { display: block; font-size: .8rem; }
+.trace-step p { color: #c8d9e8; font-size: .76rem; margin: 3px 0 2px; overflow-wrap: anywhere; }
+.trace-step small { color: var(--muted); font-size: .65rem; }
+.trace-step.agent_tool_call_requested { border-color: rgba(114, 224, 192, .45); }
+.trace-step.agent_hook_decision { border-color: rgba(114, 224, 192, .3); }
+.trace-step.observation_recorded { border-color: rgba(246, 200, 110, .4); }
+.trace-step.agent_error { border-color: rgba(255, 140, 136, .5); }
+.trace-tool-input, .trace-evidence { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
+.trace-tool-input summary, .trace-evidence summary { color: var(--accent); cursor: pointer; font-size: .72rem; }
+.trace-tool-input .result-box, .trace-evidence .result-box { margin-top: 8px; max-height: 300px; }
+.trace-next { border-left: 2px solid var(--warning); color: var(--warning) !important; padding-left: 8px; }
 .recommendation-summary { background: #0e1721; border: 1px solid var(--line); border-radius: 10px; display: grid; gap: 1px; grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: hidden; }
 .recommendation-summary.actionable { border-color: #876d32; }
 .recommendation-field { background: rgba(24, 37, 52, .72); display: grid; gap: 4px; padding: 12px; }

@@ -1,163 +1,174 @@
 # Using Amazon Bedrock AgentCore in Northstar
 
-This tutorial explains only how Amazon Bedrock AgentCore is used in the
-Northstar demo. Northstar is a synthetic IT operations environment: an agent
-investigates an operational problem, gathers evidence from a simulator, and
-produces a business-facing recommendation. A separate application boundary
-owns authoritative state changes and approval.
+Northstar is a synthetic IT operations environment that demonstrates how an AI agent can investigate operational incidents, gather evidence, and recommend a course of action.
 
-## The central idea
+The demo uses Amazon Bedrock AgentCore to manage these investigations. An agent can inspect service health, retrieve incident details, examine device diagnostics, review recent deployments, and search operational guidance through a set of read-only tools. It uses the evidence it collects to produce a business-facing recommendation.
 
-**AgentCore Harness owns model reasoning, tool selection, iteration, and stop
-conditions.**
+Northstar remains responsible for the underlying simulator state, approvals, and any state-changing operations. The agent can investigate and recommend actions, but it cannot directly modify the environment through its investigation tools.
 
-Northstar starts a managed Harness invocation and records the resulting stream.
-It does not implement a Python model/tool/model loop, choose the next tool, or
-decide when the agent should stop.
+This tutorial explains how Northstar uses AgentCore, from starting an investigation and calling tools to managing context, enforcing safety boundaries, and evaluating the result.
 
-The demo intentionally makes that boundary visible:
+## 1. How an investigation works
 
-| Responsibility | Northstar | AgentCore |
-| --- | --- | --- |
-| Start an invocation | Creates the run, session, and prompt context |  |
-| Reason about the objective |  | Harness |
-| Select the next tool |  | Harness |
-| Repeat tool calls and model turns |  | Harness |
-| Stop the investigation |  | Harness |
-| Execute a bounded simulator operation | Supplies the Gateway target | Gateway |
-| Enforce the read-only tool boundary | Supplies the lifecycle hook and backend checks | Harness invokes the hook |
-| Record authoritative simulator state | Simulator store |  |
-| Score the result | Independent evaluator |  |
+Consider a scenario where employees are unable to access a business-critical service.
 
-## 1. AgentCore's role in the demo
+Northstar creates an isolated scenario run and sends the investigation objective to AgentCore Harness. Harness then manages the investigation.
 
-Northstar uses these AgentCore capabilities:
+The agent might begin by retrieving the incident record, then check service health, examine affected devices, or review recent deployments. Each tool call returns an observation that helps the agent decide what to investigate next.
 
-| Capability | How Northstar uses it |
-| --- | --- |
-| **AgentCore Harness** | Runs the model-driven investigation, chooses tools, iterates over observations, and returns a streamed result. |
-| **AgentCore Gateway** | Presents six read-only simulator operations to the Harness as callable tools. |
-| **Harness lifecycle hook** | Runs before a tool call and rejects tools outside the allow-list or calls without a scenario run ID. |
-| **Harness managed memory** | Provides summarization and episodic continuity for a Harness session. |
-| **Harness Skills** | Provides versioned operating guidance for diagnosis, triage, safe remediation, and verification. |
+This continues until the agent has enough evidence to produce a recommendation or reaches a configured execution limit.
 
-The demo also uses Amazon Bedrock Prompt Management as a supporting service.
-It stores versioned investigation, approval-resumption, and evaluation prompt
-definitions that are rendered before a Harness invocation.
+Northstar records the investigation as it happens, including tool calls, observations, and the final report. If the recommendation involves changing simulator state, the application handles approval and execution separately. Harness can then be invoked again to verify the result.
 
-### End-to-end AgentCore flow
+The key architectural distinction is that **AgentCore Harness manages reasoning, tool selection, and iteration, while Northstar provides the tools, authoritative state, and application controls.**
 
-~~~mermaid
+### Where AgentCore fits
+
+Northstar uses several AgentCore capabilities to support this workflow:
+
+| Capability                  | Role in Northstar                                                                                   |
+| --------------------------- | --------------------------------------------------------------------------------------------------- |
+| **AgentCore Harness**       | Manages model reasoning, tool selection, iteration, and stopping conditions.                        |
+| **AgentCore Gateway**       | Exposes six read-only simulator operations as tools the agent can call.                             |
+| **Harness lifecycle hooks** | Validate tool calls before execution and reject requests outside the allowed boundary.              |
+| **Harness Skills**          | Provide reusable guidance for incident triage, diagnostics, remediation planning, and verification. |
+| **Harness managed memory**  | Maintains useful context through summarization and episodic memory.                                 |
+
+Northstar also uses Amazon Bedrock Prompt Management to maintain versioned instructions for investigations, approval resumption, and evaluation.
+
+### End-to-end architecture
+
+```mermaid
 flowchart LR
-    Request["Objective + scenario_run_id"] --> Boundary["Northstar invocation boundary"]
-    Boundary --> Prompt["Selected Prompt Management version"]
-    Prompt --> Harness["AgentCore Harness"]
+    Request["Investigation objective + scenario_run_id"]
+    Boundary["Northstar invocation boundary"]
+    Prompt["Bedrock Prompt Management"]
+    Harness["AgentCore Harness"]
+    Model["Model reasoning"]
+    Hook["before_tool_call hook"]
+    Gateway["AgentCore Gateway"]
+    Target["Lambda Gateway target"]
+    Simulator["Run-scoped simulator"]
+    Observation["Typed observation"]
+    Stream["Harness event stream"]
+    Records["Northstar event records"]
+
+    Request --> Boundary
+    Boundary --> Prompt
+    Prompt --> Harness
+
     Skills["Harness Skills"] -.-> Harness
     Memory["Managed Harness Memory"] -.-> Harness
-    Harness --> Model["Model reasoning"]
-    Model --> Hook["before_tool_call hook"]
-    Hook --> Gateway["AgentCore Gateway<br/>northstar-simulator"]
-    Gateway --> Target["Lambda Gateway target"]
-    Target --> Simulator["Run-scoped simulator"]
-    Simulator --> Observation["Typed observation"]
+
+    Harness --> Model
+    Model --> Hook
+    Hook --> Gateway
+    Gateway --> Target
+    Target --> Simulator
+    Simulator --> Observation
     Observation --> Harness
-    Harness --> Stream["Harness event stream"]
-    Stream --> Records["Northstar event records"]
-~~~
 
-The important direction is that observations go back to Harness. Northstar
-does not receive one model response and then run its own orchestration loop.
+    Harness --> Stream
+    Stream --> Records
+```
 
-## 2. The Harness invocation boundary
+The important part of this flow is what happens after a tool returns an observation. That observation goes back to Harness, which decides whether another tool call is needed.
 
-The application-facing code is deliberately thin:
+Northstar does not orchestrate those subsequent model and tool interactions. It starts the managed invocation and records the resulting events.
 
-1. Create an <code>InvocationContext</code> containing the scenario run ID,
-   session ID, request ID, and trace ID.
-2. Resolve the selected managed prompt and substitute its runtime variables.
-3. Send one <code>invoke_harness</code> request.
-4. Normalize the returned event stream into text, tool-use records, usage,
-   metrics, stop reason, and errors.
-5. Persist lifecycle events and return the result.
+## 2. Starting an investigation with Harness
 
-The boundary is implemented in:
+An investigation begins at the Northstar invocation boundary.
 
-- [harness/api.py](harness/api.py), which creates the context, resolves the
-  prompt, invokes Harness, and records events.
-- [harness/agentcore.py](harness/agentcore.py), which is the small boto3
-  adapter around the managed <code>invoke_harness</code> data-plane API.
+The application prepares the context, resolves the selected prompt, and submits a single request to the managed Harness API.
 
-<code>harness/agentcore.py</code> parses events; it does not dispatch tools or
-call the model again after receiving a tool result. A <code>turn_count</code>
-is calculated from the stream for reporting, but counting turns is not the
-same as implementing the loop.
+The process has five steps:
 
-### What the adapter does not contain
+1. Create an `InvocationContext` containing the scenario run ID, session ID, request ID, and trace ID.
+2. Resolve the selected Prompt Management version and render its runtime variables.
+3. Start the investigation using `invoke_harness`.
+4. Process the returned event stream into structured model output, tool-use records, usage metrics, stop reasons, and errors.
+5. Persist the lifecycle events and return the investigation result.
 
-There is no application code equivalent to:
+Two files implement this boundary:
 
-~~~text
+- [`harness/api.py`](harness/api.py) prepares the invocation context, resolves prompts, invokes Harness, and records events.
+- [`harness/agentcore.py`](harness/agentcore.py) provides the boto3 adapter for the managed `invoke_harness` data-plane API and normalizes its event stream.
+
+The adapter processes the events returned by Harness. It does not select tools, dispatch them, or call the model again after receiving a tool result.
+
+For example, the application does not contain an orchestration loop like this:
+
+```text
 while not finished:
     response = model(...)
     tool = choose_tool(response)
     result = call_tool(tool)
     messages.append(result)
-~~~
+```
 
-That orchestration is the managed Harness responsibility.
+Harness manages that loop internally.
 
-## 3. Harness configuration
+Northstar can calculate values such as `turn_count` from the event stream for reporting, but those calculations do not control the investigation.
 
-The Harness contract is represented by
-[harness/config/northstar-harness.yaml](harness/config/northstar-harness.yaml).
-Its AgentCore-relevant settings are:
+### Configuring Harness
 
-| Setting | Northstar value or purpose |
-| --- | --- |
-| Model | Bedrock model configured through <code>HARNESS_MODEL_ID</code>. |
-| System prompt | Evidence-first investigation instructions and a fixed recommendation format. |
-| Gateway tool source | <code>northstar-simulator</code>. |
-| Allowed tool selector | <code>@northstar-simulator</code>, the bounded Gateway target selector. |
-| Skills | Four versioned skill packages under <code>harness/skills</code>. |
-| Memory | <code>SUMMARIZATION</code> and <code>EPISODIC</code> strategies with a seven-day event expiry. |
-| Iteration bound | Twelve managed Harness iterations. |
-| Token bound | 4,096 configured maximum output tokens. |
-| Time bound | 180 seconds. |
+The Harness configuration is defined in [`harness/config/northstar-harness.yaml`](harness/config/northstar-harness.yaml).
 
-The bounds are Harness configuration, not a Python retry or loop. The model can
-stop earlier when it has enough evidence, or Harness can stop it when a bound
-is reached.
+It specifies the model, available tools, operating guidance, memory strategies, and execution limits.
 
-## 4. Gateway tools
+| Setting               | Northstar configuration                                                     |
+| --------------------- | --------------------------------------------------------------------------- |
+| Model                 | Bedrock model selected through `HARNESS_MODEL_ID`                           |
+| System prompt         | Evidence-first investigation instructions and a fixed recommendation format |
+| Gateway tool source   | `northstar-simulator`                                                       |
+| Allowed tool selector | `@northstar-simulator`                                                      |
+| Skills                | Four versioned packages under `harness/skills`                              |
+| Memory                | `SUMMARIZATION` and `EPISODIC`                                              |
+| Memory expiry         | Seven days                                                                  |
+| Maximum iterations    | 12                                                                          |
+| Maximum output tokens | 4,096                                                                       |
+| Execution time limit  | 180 seconds                                                                 |
 
-The <code>northstar-simulator</code> Gateway target exposes only read-only
-operations. The source contract is
-[harness/gateway/northstar-tools.openapi.json](harness/gateway/northstar-tools.openapi.json).
+These limits are enforced through Harness configuration rather than an application-managed retry or iteration loop.
 
-| Gateway operation | What the agent learns |
-| --- | --- |
-| <code>check_service_health</code> | Whether a business service is healthy and which dependencies are affected. |
-| <code>get_device_diagnostics</code> | Diagnostics for a device associated with the incident. |
-| <code>get_incident</code> | Incident status, impact, timeline, and known evidence. |
-| <code>find_affected_devices</code> | Which devices or users are in the affected scope. |
-| <code>list_recent_deployments</code> | Recent changes that may correlate with the incident. |
-| <code>search_knowledge</code> | Relevant operational guidance from the synthetic knowledge base. |
+The agent can finish earlier when it has sufficient evidence. Otherwise, Harness stops the investigation when a configured limit is reached.
 
-The Harness sees the Gateway-qualified names, for example:
+## 3. Connecting Harness to the simulator through Gateway
 
-~~~text
+Harness needs access to operational information to investigate an incident.
+
+Northstar provides that access through an AgentCore Gateway target named `northstar-simulator`.
+
+The Gateway exposes six read-only operations backed by the synthetic simulator.
+
+| Operation                 | Information returned                                            |
+| ------------------------- | --------------------------------------------------------------- |
+| `check_service_health`    | Service health and affected dependencies                        |
+| `get_device_diagnostics`  | Diagnostics for a device associated with the incident           |
+| `get_incident`            | Incident status, impact, timeline, and known evidence           |
+| `find_affected_devices`   | Devices or users within the affected scope                      |
+| `list_recent_deployments` | Recent changes that may be related to the incident              |
+| `search_knowledge`        | Relevant guidance from the synthetic operational knowledge base |
+
+The tool definitions are maintained in [`harness/gateway/northstar-tools.openapi.json`](harness/gateway/northstar-tools.openapi.json).
+
+Harness sees these operations using Gateway-qualified tool names, such as:
+
+```text
 northstar-simulator___check_service_health
 northstar-simulator___get_incident
-~~~
+```
 
-The <code>@northstar-simulator</code> selector keeps the Harness contract at
-the Gateway target boundary. Gateway exposure is not by itself an
-authorization grant: the target validates the run-scoped request, and the
-lifecycle hook enforces the same read-only boundary before the operation runs.
+The `@northstar-simulator` selector makes this Gateway target available to Harness.
 
-### Tool-call sequence
+When the agent selects a tool, Gateway routes the request to the Lambda target, which performs the corresponding read operation against the run-scoped simulator.
 
-~~~mermaid
+The target implementation is in [`apps/api/gateway_handler.py`](apps/api/gateway_handler.py).
+
+### What happens during a tool call
+
+```mermaid
 sequenceDiagram
     participant H as AgentCore Harness
     participant L as before_tool_call hook
@@ -165,211 +176,323 @@ sequenceDiagram
     participant T as Simulator target
     participant S as Authoritative simulator state
 
-    H->>L: Request a Gateway tool with run_id
-    L->>L: Check tool name and run_id
-    alt accepted
-        L-->>H: allow
+    H->>L: Request tool with run_id
+    L->>L: Validate tool name and run_id
+
+    alt Valid request
+        L-->>H: Allow
         H->>G: Invoke selected operation
-        G->>T: Forward bounded request
+        G->>T: Forward request
         T->>S: Read run-scoped state
         S-->>T: Typed observation
         T-->>G: Tool result
         G-->>H: Observation
-    else rejected
-        L-->>H: deny
+    else Invalid request
+        L-->>H: Deny
     end
-~~~
+```
 
-The model receives observations, not direct access to the simulator store.
+The agent receives structured observations rather than direct access to the simulator's underlying state store.
 
-## 5. Lifecycle hooks as a Harness safety boundary
+This gives Harness the information it needs to reason about the incident without exposing arbitrary simulator operations.
 
-[apps/api/hook_handler.py](apps/api/hook_handler.py) implements the
-<code>before_tool_call</code> lifecycle hook.
+Gateway also provides a clear integration boundary. The agent selects a tool based on its description and available context, while the Gateway target determines how that operation is executed.
 
-It applies two checks:
+Making a tool available through Gateway does not automatically authorize every call. Northstar validates requests before they reach the simulator.
 
-1. The requested tool must be one of the six read-only Gateway operations.
-2. The tool input must contain a non-empty <code>run_id</code>.
+## 4. Keeping investigations read-only
 
-The hook fails closed for invalid tool calls. It does not decide which tool is
-useful; Harness has already selected the tool. It only decides whether the
-selected call is inside the demo's safety contract.
+Northstar separates investigation from execution.
 
-State-changing operations are not exposed through this read-only Gateway
-selector. The application-owned approval boundary performs a synthetic change
-when one is approved, after which a new or resumed Harness invocation can
-perform read-only verification.
+During an investigation, Harness can retrieve evidence and recommend actions. It cannot use its Gateway tools to modify simulator state.
 
-## 6. Skills provide context, not authority
+This boundary is enforced through the available Gateway operations, a Harness lifecycle hook, and validation in the simulator backend.
 
-The Harness attaches four skill packages:
+### Validating tool calls with a lifecycle hook
 
-| Skill package | Purpose in the investigation |
-| --- | --- |
-| <code>vpn-diagnostics</code> | Structured connectivity and device-diagnostic guidance. |
-| <code>incident-triage</code> | Evidence collection, impact assessment, and uncertainty handling. |
-| <code>safe-remediation</code> | Guidance for describing a bounded, approval-required change. |
-| <code>post-change-verification</code> | Guidance for checking authoritative state after a change. |
+The lifecycle hook is implemented in [`apps/api/hook_handler.py`](apps/api/hook_handler.py).
 
-Skills help Harness reason consistently about the domain. They do not add
-tools, grant permissions, or change the lifecycle-hook decision. A skill can
-describe a safe remediation, but the agent still cannot perform a mutation
-through the read-only Gateway contract.
+It runs at the `before_tool_call` stage and checks two things:
 
-## 7. Managed memory versus authoritative state
+1. The requested tool is one of the six permitted read-only Gateway operations.
+2. The tool input contains a non-empty `run_id`.
 
-Northstar enables Harness managed memory with:
+If either check fails, the hook rejects the call.
 
-- <code>SUMMARIZATION</code>, so long conversations can be compressed into
-  useful context.
-- <code>EPISODIC</code>, so relevant prior interaction context can be retained.
-- A seven-day event expiry for the demo.
+Harness has already selected the tool at this point. The hook does not decide whether the tool is useful for the investigation. Its responsibility is to determine whether the requested call satisfies Northstar's tool-use contract.
 
-Memory is useful for continuity; it is not the system of record. The
-run-scoped simulator and its durable records remain authoritative for:
+The Gateway target also validates the run-scoped request before accessing simulator state.
 
-- current service, incident, device, and deployment state;
-- whether an observation was actually returned;
-- whether a synthetic change was approved and executed;
-- whether post-change verification passed.
+### Handling state-changing recommendations
 
-This distinction prevents the agent from treating remembered text as proof that
-an operational state changed.
+An investigation may conclude that an operational change is necessary.
 
-## 8. Prompt Management feeds Harness
+For example, the agent might recommend a bounded remediation to restore service. It can explain the proposed action, supporting evidence, and expected outcome, but it cannot execute that change through the read-only Gateway target.
 
-Northstar keeps prompt content in native Bedrock Prompt Management resources
-when the managed source is enabled. The fixed prompt catalog contains:
+Instead, the application handles the approval and execution process.
 
-| Prompt | AgentCore use |
-| --- | --- |
-| <code>investigation</code> | Starts an evidence-first read-only investigation. |
-| <code>approval_resumption</code> | Rehydrates context after an application-owned approved operation and asks Harness to verify the result. |
-| <code>evaluation</code> | Gives bounded evaluation runs a consistent evidence contract. |
+Once an approved synthetic change has been applied, Northstar can start or resume a Harness invocation to verify the result using the same read-only tools.
 
-[harness/prompt_management.py](harness/prompt_management.py) resolves the
-operator-selected immutable version, substitutes variables such as
-<code>scenario_run_id</code>, and returns the rendered text to the Harness
-adapter. Runtime event metadata records the prompt key, version, ARN, and
-source without putting the entire prompt body into every event.
+This keeps the responsibilities separate:
 
-Prompt Management changes the instructions supplied to Harness; it does not
-replace Harness orchestration or add permissions.
+- **Harness** investigates, reasons, recommends, and verifies.
+- **The application** manages approval and state-changing actions.
+- **The simulator** maintains authoritative operational state.
 
-## 9. What AgentCore owns and what Northstar owns
+A recommendation is therefore not treated as evidence that a change has already occurred.
 
-The boundary can be summarized as follows:
+## 5. Providing guidance and context
 
-| AgentCore Harness owns | Northstar owns |
-| --- | --- |
-| Model reasoning | Invocation context and run identity |
-| Tool selection | Prompt version resolution |
-| Iteration over tool observations | Authoritative simulator state |
-| Stop conditions | Approval and state-changing application actions |
-| Harness memory behavior | Durable lifecycle and observation records |
-| Streaming Harness events | Independent evaluation |
+Harness needs more than tools to carry out a useful investigation. It also needs instructions about how to interpret evidence, handle uncertainty, and structure recommendations.
 
-The Gateway owns the translation from a selected operation to the bounded
-simulator target. The lifecycle hook is the final pre-tool-call check.
+Northstar provides this context through Harness Skills, managed memory, and Bedrock Prompt Management.
 
-## 10. Determinism in the demo
+These mechanisms serve different purposes. Skills provide reusable domain guidance, memory preserves relevant context, and prompts define the objective and instructions for a particular invocation.
 
-The demo is deterministic where the evaluator needs repeatable evidence:
+### Harness Skills
 
-- the simulator is seeded and run-scoped;
-- Gateway tool behavior and synthetic state transitions are controlled;
-- scenario definitions and expected outcomes are versioned;
-- the evaluator reads state and typed observations rather than judging prose.
+Northstar attaches four versioned skill packages:
 
-The agent itself is still model-driven. These values can vary:
+| Skill                      | Purpose                                                                     |
+| -------------------------- | --------------------------------------------------------------------------- |
+| `vpn-diagnostics`          | Guides connectivity troubleshooting and device diagnostics                  |
+| `incident-triage`          | Structures evidence collection, impact assessment, and uncertainty handling |
+| `safe-remediation`         | Guides the description of bounded changes that require approval             |
+| `post-change-verification` | Guides verification after an approved change                                |
 
-- which useful tool Harness selects first;
-- how many managed turns are needed;
-- the wording of the report;
-- latency and token usage.
+The packages are stored under `harness/skills`.
 
-So the precise statement is:
+Skills help the agent approach operational problems consistently. For example, an incident-triage skill can guide the agent to establish impact and gather supporting evidence before reaching a conclusion.
 
-> The simulator and evaluator are deterministic; the Harness agent is
-> model-driven.
+A post-change-verification skill can guide the agent to check actual simulator state rather than assuming that a remediation succeeded.
 
-## 11. Evaluation outside the Harness
+Skills do not expand the agent's permissions. They cannot add Gateway operations, bypass lifecycle hooks, or authorize state changes.
 
-[evaluation/runner.py](evaluation/runner.py) intentionally sits outside the
-Harness invocation. It does not call a model and does not implement another
-agent loop.
+### Managed Harness memory
 
-It combines:
+Northstar enables two managed memory strategies:
 
-- authoritative simulator state;
-- durable lifecycle events;
-- typed tool observations;
-- versioned expected outcomes;
-- usage and latency fields.
+- `SUMMARIZATION` compresses longer interaction histories into useful context.
+- `EPISODIC` retains relevant context from previous interactions.
 
-This allows the demo to evaluate whether the agent:
+The demo configures a seven-day expiry for memory events.
 
-- gathered the required evidence;
-- stayed inside the read-only tool boundary;
-- handled recovery and checkpoint conditions;
-- produced a recommendation consistent with observed state;
-- avoided claiming that an unexecuted change was completed.
+Memory helps Harness maintain continuity, particularly when an investigation spans multiple interactions or resumes after an approval step.
 
-The final model report is useful to a person, but it is not the sole source of
-truth for evaluation.
+However, remembered context is not authoritative evidence about the current environment.
 
-## 12. Example investigation
+For example, memory might contain a previous observation indicating that a service was unhealthy. That observation can help the agent understand the investigation history, but it does not establish the service's current condition.
 
-Consider a business service that employees cannot use.
+The simulator remains the source of truth for service health, incidents, devices, deployments, approved changes, and verification results.
 
-1. Northstar creates an isolated <code>scenario_run_id</code> and sends the
-   objective to the managed Harness.
-2. Harness reasons from the objective and selects a read-only Gateway tool,
-   such as <code>get_incident</code> or <code>check_service_health</code>.
-3. The lifecycle hook checks the tool name and run ID.
-4. Gateway invokes the simulator target and returns a typed observation.
-5. Harness decides whether another observation is needed, without Northstar
-   choosing the next tool.
-6. Harness stops when it has enough evidence or reaches its configured bound.
-7. The application records the stream and exposes the report, including the
-   required recommendation fields.
-8. If a state-changing recommendation needs approval, that action remains
-   outside the read-only Harness selector. A later Harness invocation verifies
-   the authoritative result.
+When the agent needs to establish current operational state, it must use the available tools to retrieve evidence.
 
-This is the AgentCore lesson in the demo: the managed Harness performs the
-agentic work, while the surrounding application supplies bounded tools,
-authoritative state, and verification.
+### Bedrock Prompt Management
 
-## 13. AgentCore capabilities not separately used
+Northstar uses Amazon Bedrock Prompt Management to maintain versioned prompt definitions.
 
-These capabilities are intentionally outside the current Northstar AgentCore
-boundary:
+The demo has three prompt types:
 
-| Capability | Status in this demo |
-| --- | --- |
-| AgentCore Runtime | Not used as a separate Northstar component; the application invokes the managed Harness directly. |
-| AgentCore Identity | Not used as the tool authorization mechanism. The demo uses its application identity boundary and IAM-controlled service calls. |
-| AgentCore Policy | Not configured as a separate policy engine. The current boundary uses the Gateway allow-list, lifecycle hook, backend validation, and IAM. |
-| AgentCore Observability | The demo records normalized Harness events and run records directly; it does not depend on a separate AgentCore Observability workflow. |
-| AgentCore Evaluations | The independent evaluator is repository code over deterministic simulator evidence, not the separate AgentCore Evaluations service. |
+| Prompt                | Purpose                                                                                                 |
+| --------------------- | ------------------------------------------------------------------------------------------------------- |
+| `investigation`       | Starts an evidence-first, read-only investigation                                                       |
+| `approval_resumption` | Restores context after an application-owned approved operation and directs Harness to verify the result |
+| `evaluation`          | Provides consistent instructions for bounded evaluation runs                                            |
 
-These omissions are deliberate: the tutorial isolates the Harness, Gateway,
-Memory, Skills, and lifecycle-hook concepts that the demo exercises.
+Prompt resolution is implemented in [`harness/prompt_management.py`](harness/prompt_management.py).
 
-## 14. Code map
+When the managed prompt source is enabled, Northstar resolves the selected immutable prompt version and substitutes runtime variables such as `scenario_run_id`.
 
-| File | AgentCore concept |
-| --- | --- |
-| [harness/agentcore.py](harness/agentcore.py) | Thin <code>invoke_harness</code> adapter and event normalization. |
-| [harness/api.py](harness/api.py) | Invocation context, prompt resolution, Harness invocation, and event recording. |
-| [harness/config/northstar-harness.yaml](harness/config/northstar-harness.yaml) | Harness model, Gateway, Skills, Memory, and execution bounds. |
-| [harness/gateway/northstar-tools.openapi.json](harness/gateway/northstar-tools.openapi.json) | Read-only Gateway tool contract. |
-| [apps/api/gateway_handler.py](apps/api/gateway_handler.py) | Gateway target dispatch into simulator read operations. |
-| [apps/api/hook_handler.py](apps/api/hook_handler.py) | <code>before_tool_call</code> allow/deny decision. |
-| [harness/prompt_management.py](harness/prompt_management.py) | Prompt Management version resolution and variable rendering. |
-| [evaluation/runner.py](evaluation/runner.py) | Independent evidence-based evaluation. |
+The rendered prompt is then passed to the Harness adapter.
+
+Northstar also records prompt metadata, including the prompt key, version, ARN, and source, in its runtime events. This makes it possible to identify which instructions were used for an investigation without copying the complete prompt body into every event.
+
+Prompt Management controls the instructions supplied to Harness. It does not replace Harness orchestration or change the agent's tool permissions.
+
+## 6. Recording and evaluating investigations
+
+Northstar records the events produced by Harness so that an investigation can be inspected and evaluated after it completes.
+
+The event stream provides information about what happened during execution, including tool usage, observations, model output, token usage, latency, stop reasons, and errors.
+
+These records are useful for understanding how the agent reached its recommendation.
+
+However, evaluating an investigation requires more than reading the final report.
+
+An agent might produce a convincing explanation while missing an important observation, or describe a remediation as completed when no state change occurred.
+
+Northstar addresses this by evaluating investigations against simulator evidence and durable execution records.
+
+### Keeping the simulator repeatable
+
+The demo uses a seeded, run-scoped simulator.
+
+Each scenario has controlled initial conditions, tool behavior, and synthetic state transitions. Scenario definitions and expected outcomes are versioned.
+
+This provides a repeatable environment for evaluating investigations.
+
+The agent itself remains model-driven, so some aspects of execution can vary between runs:
+
+- Which relevant tool it selects first
+- How many turns it needs to gather evidence
+- How it phrases its recommendation
+- How much time and token usage the investigation requires
+
+The distinction is that **the simulator and evaluator are deterministic, while the Harness investigation is model-driven.**
+
+The evaluator can therefore assess whether the agent obtained the required evidence and respected the execution boundaries without requiring every investigation to follow exactly the same sequence of tool calls.
+
+### Independent evaluation
+
+The evaluator is implemented in [`evaluation/runner.py`](evaluation/runner.py).
+
+It runs outside the Harness invocation and evaluates the investigation using:
+
+- Authoritative simulator state
+- Durable lifecycle events
+- Typed tool observations
+- Versioned expected outcomes
+- Usage and latency information
+
+The evaluator checks whether the agent gathered the required evidence, stayed within the read-only boundary, handled recovery and checkpoint conditions, and produced a recommendation consistent with the observed state.
+
+It also checks that the agent does not claim an unexecuted change was completed.
+
+This evaluation is based on structured evidence rather than relying solely on the model's final prose.
+
+The evaluator does not run a separate model-driven investigation or implement another agent loop.
+
+## 7. Following an investigation from start to finish
+
+The complete workflow can be illustrated with a service outage scenario.
+
+Suppose employees report that a business application is unavailable.
+
+**Step 1: Northstar creates the scenario run**
+
+The application creates an isolated `scenario_run_id` and prepares the invocation context.
+
+It resolves the selected investigation prompt and sends the objective to AgentCore Harness.
+
+**Step 2: Harness begins investigating**
+
+Harness interprets the objective and selects an appropriate read-only tool.
+
+It might start with `get_incident` to understand the reported impact or `check_service_health` to inspect the affected service.
+
+**Step 3: The tool call is validated**
+
+Before execution, the lifecycle hook checks the requested tool name and confirms that the input includes a run ID.
+
+A valid call proceeds to Gateway. An invalid call is rejected.
+
+**Step 4: Gateway retrieves simulator evidence**
+
+Gateway invokes the Lambda target, which reads the corresponding run-scoped simulator state.
+
+The simulator returns a typed observation, such as incident details or service-health information.
+
+**Step 5: Harness decides what to investigate next**
+
+Harness receives the observation and uses it to decide whether additional evidence is needed.
+
+For example, if the service-health result indicates a dependency problem, Harness might inspect affected devices or review recent deployments.
+
+Northstar does not select these follow-up tools.
+
+**Step 6: Harness produces a recommendation**
+
+Once the agent has sufficient evidence, or reaches a configured execution bound, Harness ends the investigation.
+
+The final report follows the configured recommendation format and explains the findings using the available evidence.
+
+**Step 7: Northstar records and evaluates the result**
+
+The application persists the event stream and makes the investigation report available.
+
+The independent evaluator checks the recorded observations and authoritative simulator state against the scenario's expected outcomes.
+
+**Step 8: An approved change can be verified**
+
+If the recommendation requires a state-changing operation, the application handles approval and execution outside the read-only Gateway contract.
+
+A subsequent Harness invocation can retrieve fresh simulator evidence to verify whether the approved change had the intended effect.
+
+This workflow demonstrates the division of responsibility: Harness performs the investigation, Gateway provides controlled access to evidence, and Northstar manages state, approval, and evaluation.
+
+## 8. Understanding the component boundaries
+
+The architecture deliberately separates agent orchestration from application responsibilities.
+
+| Component                     | Responsibility                                                                                        |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------- |
+| **AgentCore Harness**         | Model reasoning, tool selection, iteration, stopping conditions, and event streaming                  |
+| **AgentCore Gateway**         | Exposing and routing bounded simulator operations                                                     |
+| **Lifecycle hook**            | Validating tool calls before execution                                                                |
+| **Harness Skills**            | Providing reusable investigation guidance                                                             |
+| **Harness managed memory**    | Maintaining relevant interaction context                                                              |
+| **Bedrock Prompt Management** | Storing and resolving versioned invocation instructions                                               |
+| **Northstar application**     | Creating runs, invoking Harness, recording events, managing approvals, and executing approved changes |
+| **Northstar simulator**       | Maintaining authoritative synthetic operational state                                                 |
+| **Northstar evaluator**       | Checking results against structured evidence and expected outcomes                                    |
+
+This separation is also why the demo does not need to implement its own model/tool/model orchestration loop.
+
+Harness owns the investigation process. Northstar supplies the surrounding environment and application controls.
+
+### AgentCore capabilities outside this demo
+
+Northstar focuses on the AgentCore capabilities directly involved in its investigation workflow.
+
+Several other AgentCore services are not configured as separate components:
+
+| Capability                  | How it relates to Northstar                                                                                                                                |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **AgentCore Runtime**       | Northstar invokes the managed Harness directly rather than using Runtime as a separate application component.                                              |
+| **AgentCore Identity**      | The demo uses its application identity boundary and IAM-controlled service calls rather than AgentCore Identity for tool authorization.                    |
+| **AgentCore Policy**        | Tool restrictions are enforced through the Gateway allow-list, lifecycle hook, backend validation, and IAM rather than a separate AgentCore Policy engine. |
+| **AgentCore Observability** | Northstar records normalized Harness events and run records directly instead of relying on a separate AgentCore Observability workflow.                    |
+| **AgentCore Evaluations**   | Evaluation is implemented in repository code against deterministic simulator evidence rather than through the separate AgentCore Evaluations service.      |
+
+These choices keep the demo focused on how Harness, Gateway, Skills, Memory, and lifecycle hooks work together during an investigation.
+
+They do not imply that the omitted services are unnecessary for other AgentCore applications.
+
+## 9. Exploring the implementation
+
+The following files provide the main entry points for understanding the integration.
+
+| File                                                                                           | What it implements                                                             |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| [`harness/api.py`](harness/api.py)                                                             | Invocation context, prompt resolution, Harness invocation, and event recording |
+| [`harness/agentcore.py`](harness/agentcore.py)                                                 | `invoke_harness` adapter and event normalization                               |
+| [`harness/config/northstar-harness.yaml`](harness/config/northstar-harness.yaml)               | Harness model, Gateway, Skills, Memory, and execution limits                   |
+| [`harness/gateway/northstar-tools.openapi.json`](harness/gateway/northstar-tools.openapi.json) | Read-only Gateway tool definitions                                             |
+| [`apps/api/gateway_handler.py`](apps/api/gateway_handler.py)                                   | Gateway target dispatch to simulator read operations                           |
+| [`apps/api/hook_handler.py`](apps/api/hook_handler.py)                                         | `before_tool_call` validation                                                  |
+| [`harness/prompt_management.py`](harness/prompt_management.py)                                 | Prompt version resolution and variable rendering                               |
+| [`evaluation/runner.py`](evaluation/runner.py)                                                 | Independent evidence-based evaluation                                          |
+
+A useful way to explore the code is to follow the same path as an investigation:
+
+1. Start with `harness/api.py` to see how Northstar prepares and starts an invocation.
+2. Open `harness/agentcore.py` to see how the application calls Harness and processes its event stream.
+3. Review `northstar-harness.yaml` to understand the configured model, tools, memory, skills, and execution limits.
+4. Examine the Gateway OpenAPI contract and target handler to see how the agent retrieves simulator evidence.
+5. Review the lifecycle hook to understand the read-only tool boundary.
+6. Finish with `evaluation/runner.py` to see how the investigation is assessed independently of the model's final report.
+
+## Conclusion
+
+Northstar demonstrates how Amazon Bedrock AgentCore can manage an agent-driven operational investigation without requiring the application to implement its own reasoning and tool-use loop.
+
+Harness manages the investigation, selects tools, processes observations, and determines when to stop. Gateway connects those tool calls to a bounded simulator, while lifecycle hooks and backend validation enforce the read-only boundary.
+
+Skills, managed memory, and versioned prompts provide the context the agent needs to investigate consistently.
+
+Northstar remains responsible for authoritative state, approvals, durable records, and evaluation. This allows the agent to investigate and recommend actions while keeping operational changes under application control.
+
+The result is an architecture where the agent's reasoning can remain flexible, but its access to the environment and the evidence used to evaluate its work are explicitly controlled.
 
 ## References
 

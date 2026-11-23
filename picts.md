@@ -7,3 +7,5 @@
 ![Northstar investigation progress](images/investigation-progress.png)
 ![Northstar investigation findings](images/investigation-findings.png)
 ![Northstar replayable execution timeline](images/execution-timeline.png)
+![Northstar teaching trace and selected guidance](images/teaching-trace-guidance.png)
+![Northstar observable agentic tool loop](images/agentic-tool-loop.png)

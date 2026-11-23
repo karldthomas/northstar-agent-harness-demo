@@ -230,6 +230,7 @@ class ScenarioRun:
             "state": self.state.to_dict(),
             "faults": self.faults.to_dict(),
             "events": deepcopy(self.events),
+            "observations": deepcopy(self.observations),
             "observation_count": len(self.observations),
             "operations": [record.to_dict() for record in self.operations.list()],
             "approvals": [approval.to_dict() for approval in self.approvals.values()],

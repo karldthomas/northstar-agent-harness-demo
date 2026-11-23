@@ -61,6 +61,25 @@ def test_independent_evaluation_route_returns_state_based_scorecard() -> None:
     assert payload["metrics"]["tool_call_count"] >= 1
 
 
+def test_run_snapshot_returns_authoritative_tool_observations_for_the_trace() -> None:
+    run_id = f"snapshot-observations-{uuid4().hex}"
+    store.create_run("vpn-deployment-failure", run_id=run_id)
+    client = TestClient(app)
+
+    tool_response = client.get(
+        f"/simulator/runs/{run_id}/tools/get-incident",
+        params={"incident_id": "INC-0001"},
+    )
+    snapshot_response = client.get(f"/simulator/runs/{run_id}")
+
+    assert tool_response.status_code == 200
+    assert snapshot_response.status_code == 200
+    observations = snapshot_response.json()["observations"]
+    assert observations[0]["tool_name"] == "get_incident"
+    assert observations[0]["authoritative"] is True
+    assert observations[0]["data"]["incident_id"] == "INC-0001"
+
+
 def test_harness_api_requires_an_explicit_managed_harness_binding(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NORTHSTAR_HARNESS_ARN", raising=False)
     client = TestClient(app)
@@ -140,8 +159,18 @@ def test_harness_stream_records_turn_and_tool_markers_in_the_run_timeline(
                 occurred_at="2026-11-20T00:00:01+00:00",
             )
             yield HarnessEvent(
-                event_type="messageStop",
+                event_type="contentBlockDelta",
                 sequence=3,
+                scenario_run_id=context.scenario_run_id,
+                session_id=context.session_id,
+                request_id=context.request_id,
+                trace_id=context.trace_id,
+                payload={"delta": {"toolUse": {"name": "northstar-simulator___get_incident", "toolUseId": "tool-1", "input": {"run_id": run_id, "incident_id": "INC-0001", "gateway_context_token": "secret"}}}},
+                occurred_at="2026-11-20T00:00:01+00:00",
+            )
+            yield HarnessEvent(
+                event_type="messageStop",
+                sequence=4,
                 scenario_run_id=context.scenario_run_id,
                 session_id=context.session_id,
                 request_id=context.request_id,
@@ -160,12 +189,24 @@ def test_harness_stream_records_turn_and_tool_markers_in_the_run_timeline(
     event_types = [event["event_type"] for event in store.events_since(run_id)["events"]]
     assert event_types == [
         "scenario_created",
+        "skills_selected",
         "agent_invocation_started",
         "agent_turn_started",
         "agent_tool_call_requested",
+                "agent_tool_call_input",
         "agent_turn_completed",
         "agent_invocation_completed",
     ]
+    selection = store.events_since(run_id)["events"][1]["payload"]
+    assert selection["selected_skill_ids"] == ["vpn-diagnostics", "incident-triage", "safe-remediation"]
+    assert "# VPN Diagnostics" in next(
+        skill["text"]
+        for skill in selection["selected_skills"]
+        if skill["id"] == "vpn-diagnostics"
+    )
+    tool_input = store.events_since(run_id)["events"][5]["payload"]["tool_input"]
+    assert tool_input["incident_id"] == "INC-0001"
+    assert tool_input["gateway_context_token"] == "[redacted]"
 
 
 def test_harness_invocation_enforces_actor_run_ownership() -> None:

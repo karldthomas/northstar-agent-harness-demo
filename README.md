@@ -108,7 +108,20 @@ available for review after the run completes.
 
 ![Northstar investigation findings](images/investigation-findings.png)
 
-### 6. Inspect affected devices
+### 6. Understand the guidance and agentic loop
+
+The teaching trace makes the observable agent loop explicit. It shows the
+scenario-relevant guidance packages and their reference text, then separates
+that display mapping from the actual Harness telemetry. The loop records each
+managed turn, tool request, safety-hook decision, authoritative result, and the
+next recorded turn. It does not claim to expose private model reasoning or
+skill attribution that AgentCore does not emit.
+
+![Northstar teaching trace and selected guidance](images/teaching-trace-guidance.png)
+
+![Northstar observable agentic tool loop](images/agentic-tool-loop.png)
+
+### 7. Inspect affected devices
 
 The fleet view makes the scope concrete by listing devices, offices, health,
 and connectivity state. Here, the affected London devices are degraded and
@@ -116,7 +129,7 @@ disconnected from VPN.
 
 ![Northstar fleet view](images/device-fleet.png)
 
-### 7. Follow investigation progress
+### 8. Follow investigation progress
 
 The live progress card shows the run's lifecycle: run created, agent planning,
 evidence collection, recommendation building, and ready for review. The latest
@@ -124,7 +137,7 @@ activity makes the current stage easy to scan.
 
 ![Northstar investigation progress](images/investigation-progress.png)
 
-### 8. Replay what happened
+### 9. Replay what happened
 
 The execution timeline preserves the run as ordered events—scenario creation,
 agent invocation, reasoning passes, tool calls, observations, and subsequent
