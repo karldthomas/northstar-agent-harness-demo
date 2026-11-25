@@ -1,10 +1,5 @@
 # Northstar IT Operations
 
-This case study and its implementation were created with substantial
-assistance from AI. AI generated much of the code and helped develop the
-accompanying materials, while I directed the architecture, made the design
-decisions, and reviewed the results. This project is intended as a tutorial.
-
 ## Overview
 
 Northstar represents the internal IT operations and service-management team of
@@ -30,6 +25,13 @@ All company data and infrastructure are simulated. Northstar is a safe test
 environment for exploring Amazon Bedrock AgentCore Harness concepts such as
 tool use, durable runs, approval gates, recovery, and independent evaluation;
 it does not change real infrastructure.
+
+## AI Assistance
+
+This case study and its implementation were created with substantial
+assistance from AI. AI generated much of the code and helped develop the
+accompanying materials, while I directed the architecture, made the design
+decisions, and reviewed the results. This project is intended as a tutorial.
 
 ## Features
 
